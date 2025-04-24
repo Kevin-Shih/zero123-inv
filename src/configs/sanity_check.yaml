@@ -1,0 +1,15 @@
+dataroot: "data/gso_alarm_my_render/"
+model: 
+  gpu_idx: 0
+  model_config: "configs/sd-objaverse-finetune-c_concat-256.yaml"
+  ckpt: "../105000.ckpt"
+  lr: 1e-4
+input:
+  ref_image: "elev=0_azi=0.png"
+  target_image: "elev=0_azi=0.png"
+  rel_elev: 0.0
+  rel_azi: 5.0
+  rel_radius: 0.0
+log:
+  log_root: "../sanity_check/identity_input_regression/"
+  run_name: "alarm"

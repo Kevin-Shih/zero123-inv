@@ -50,9 +50,7 @@ def sample_model(input_im, model, sampler, precision, h, w,
     with precision_scope('cuda'):
         with model.ema_scope():
             c = model.get_learned_conditioning(input_im).tile(n_samples, 1, 1)
-            T = torch.tensor([elevation,
-                              math.sin(azimuth), math.cos(azimuth),
-                              radius])
+            T = torch.tensor([elevation, math.sin(azimuth), math.cos(azimuth), radius])
             T = T[None, None, :].repeat(n_samples, 1, 1).to(c.device)
             c = torch.cat([c, T], dim=-1).float()
             c = model.cc_projection(c)

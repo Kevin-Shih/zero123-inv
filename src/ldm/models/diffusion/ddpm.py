@@ -125,6 +125,7 @@ class DDPM(pl.LightningModule):
 
     def register_schedule(self, given_betas=None, beta_schedule="linear", timesteps=1000,
                           linear_start=1e-4, linear_end=2e-2, cosine_s=8e-3):
+        print("Registering schedule")
         if exists(given_betas):
             betas = given_betas
         else:
@@ -325,6 +326,16 @@ class DDPM(pl.LightningModule):
         noise = default(noise, lambda: torch.randn_like(x_start))
         return (extract_into_tensor(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
                 extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise)
+    
+    def q_sample_2(self, input_start, target_start, t_in, t_target, noise=None):
+        noise = default(noise, lambda: torch.randn_like(input_start))
+        noisy_input = (extract_into_tensor(self.sqrt_alphas_cumprod, t_in, input_start.shape) * input_start +
+                       extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t_in, input_start.shape) * noise)
+        noisy_target = (extract_into_tensor(self.sqrt_alphas_cumprod, t_target, target_start.shape) * target_start +
+                       extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t_target, target_start.shape) * noise)
+        noise_target = (extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t_in, input_start.shape) - 
+                        extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t_target, target_start.shape)) * noise
+        return noisy_input, noisy_target, noise_target
 
     def get_loss(self, pred, target, mean=True):
         if self.loss_type == 'l1':
