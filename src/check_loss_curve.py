@@ -122,7 +122,8 @@ def sample_model(input_im, target_im, LDModel, precision, h, w,
             target_encoder_posterior = LDModel.encode_first_stage(target_im)
             target_im_z = LDModel.get_first_stage_encoding(target_encoder_posterior)
             # Add noise to the input latent and target latent
-            _noise = torch.randn_like(input_im_z)
+            # _noise = torch.randn_like(input_im_z)
+            _noise = torch.randn(size, device=input_im_z.device)
             input_latent = LDModel.q_sample(input_im_z, t, _noise)
             target_latent = LDModel.q_sample(target_im_z, t-1, _noise)
             # Get condintioning
@@ -175,7 +176,7 @@ def sample_model(input_im, target_im, LDModel, precision, h, w,
             
             # before revise
             # return torch.clamp((x_prev + 1.0) / 2.0, min=0.0, max=1.0), target_latent, pred_x0, input_latent
-            return x_prev, target_latent, pred_x0, input_latent
+            return x_prev, target_latent, pred_x0, input_latent, target_im_z
 
 
 def main_run(conf,
@@ -184,7 +185,7 @@ def main_run(conf,
              gt_elevation=0.0, gt_azimuth=0.0, gt_radius=0.0,
              start_elevation=0.0, start_azimuth=0.0, start_radius=0.0,
              preprocess=True,
-             scale=3.0, n_samples=1, ddim_steps=75, ddim_eta=1.0,
+             scale=3.0, n_samples=4, ddim_steps=75, ddim_eta=1.0,
              learning_rate = 1e-3,
              precision='fp32', h=256, w=256,
              tb_writer:writer.SummaryWriter=writer.SummaryWriter(),):
@@ -223,97 +224,165 @@ def main_run(conf,
     
     # used_x = -x  # NOTE: Polar makes more sense in Basile's opinion this way!
     # used_elevation = elevation  # NOTE: Set this way for consistency.
-    est_elev = Parameter(data=Tensor([start_elevation]).to(torch.float32).to(device), requires_grad=True)
-    est_azimuth = Parameter(data=Tensor([start_azimuth]).to(torch.float32).to(device), requires_grad=True)
-    est_radius = Parameter(data=Tensor([start_radius]).to(torch.float32).to(device), requires_grad=True)
-
-    # optim = torch.optim.Adam([elevation, azimuth, radius], lr=1e-3), {'params': sampler.model.parameters()}
-    print("learning_rate = ", learning_rate)
-    # optimizer = optim.Adam([{'params': est_elev},
-    #                         {'params': est_azimuth}], lr=learning_rate)#{'params': est_radius, 'lr': 1e-18}
-    optimizer = optim.Adam([{'params': est_azimuth}], lr=learning_rate)
-    assert conf.model.lr_scheduler
-    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=conf.model.lr_scheduler.milestones, 
-                                                   gamma=conf.model.lr_scheduler.gamma) # 0.1 for 5e-3, 0.1 for 3e-3, 0.25 for 1e-3
-
-    max_iter = 1000
+    start_elevation = Tensor([start_elevation]).to(torch.float32).to(device)
+    start_radius = Tensor([start_radius]).to(torch.float32).to(device)
+    latent_loss_all = []
+    latent_x0_loss_all = []
+    img_loss_pred_target_all = []
+    img_loss_all = []
     from tqdm import tqdm
-    iterator = tqdm(range(max_iter), desc='DDIM', total=max_iter, ncols=140)
+    azi_list =np.array([x for x in range(-300, 301, 1)]) / 10.0  + np.round(np.rad2deg(gt_azimuth),0)
+    start_azimuth = Tensor(np.deg2rad(azi_list)).to(torch.float32).to(device)
+    max_iter = len(azi_list)
     max_index = 35
-    min_index = 0
-    interval = max_iter/(max_index - min_index + 1)
-    step_interval = int(1000//75)
-    for i, iter in enumerate(iterator):
-        iterator.set_description_str(f'[{iter}/{max_iter}]')
-        optimizer.zero_grad()
+    for index in range(max_index, max_index+1):
+        pbar = tqdm(range(max_iter), desc='DDIM', total=max_iter, ncols=140)
         
-        if iter < 200: 
-            index = np.random.randint(20, max_index)
-        elif iter < 500:
-            index = np.random.randint(10, 20)
-        else:
-            index = np.random.randint(min_index, 10)
-        # index = int(max_index - iter//interval)
-        # index = max_index
-        step = step_interval * max(index, 0) + 1
-        pred_target, target_latent, pred_x0, input_latent = sample_model(input_im, target_im, LDModel, precision, 
-                                                     h, w, n_samples, scale, ddim_eta,
-                                                     est_elev, est_azimuth, est_radius, step)
-        decode_pred_target = LDModel.decode_first_stage(pred_target)
-        decode_target_latent = LDModel.decode_first_stage(target_latent)
-        latent_loss = nn.functional.mse_loss(pred_target, target_latent)
-        img_loss_pred_target = nn.functional.mse_loss(decode_pred_target, decode_target_latent)
-        if conf.log and conf.log.log_all_img:
-            if i % conf.log.log_all_img_freq == 0:
-                # region for logging
-                with torch.no_grad():
-                    decode_img = LDModel.decode_first_stage(pred_x0)
-                    decode_input_latent = LDModel.decode_first_stage(input_latent)
-                    input_latent_loss = nn.functional.mse_loss(input_latent, target_latent)
-                    img_loss = nn.functional.mse_loss(decode_img, target_im)
-                    tb_writer.add_scalar('Loss/img', img_loss.item(), iter)
-                    tb_writer.add_scalar('Loss/input_latent', input_latent_loss.item(), iter)
-                    tb_writer.add_image('Image/generated_input_latent', decode_input_latent[0], iter)
-                    tb_writer.add_image('Image/generated_pred_x0', decode_img[0], iter)
-                # endregion 
-        loss = latent_loss + img_loss_pred_target
-        loss.backward()
-        optimizer.step()
-        if conf.model.lr_scheduler.use:
-            scheduler.step()
-        with torch.no_grad():
-            # _x_sample = 255.0 * rearrange((decode_img[0]).cpu().numpy(), 'c h w -> h w c')
-            # Image.fromarray(_x_sample.astype(np.uint8)).save(f'../test_{step}.png')
-            # tb_writer.add_image('Image/generated', _x_sample, iter)
-            temp_elev= np.rad2deg(est_elev.item())
-            temp_azi= np.rad2deg(est_azimuth.item())
-            # region elev&azi wrapup
-            # while temp_elev > 180:
-            #     temp_elev = temp_elev - 2*180
-            # while temp_elev < -180:
-            #     temp_elev = temp_elev + 2*180
-            # while temp_azi < 0:
-            #     temp_azi = temp_azi + 2*180
-            # while temp_azi > 2*180:
-            #     temp_azi = temp_azi - 2*180
-            # endregion
 
-            err = [temp_elev - np.rad2deg(gt_elevation), temp_azi - np.rad2deg(gt_azimuth), est_radius.item() - gt_radius]
-            iterator.set_postfix_str(f'step: {index}-{step}, loss: {loss.item():.3f}, Err elev, azi= {err[0]:.2f}, {err[1]:.2f}, Curr= {temp_elev:.2f}, {temp_azi:.2f}')
-            tb_writer.add_scalar('Loss/total', loss.item(), iter)
-            tb_writer.add_scalar('Loss/img_pred_target', img_loss_pred_target.item(), iter)
-            tb_writer.add_scalar('Loss/latent', latent_loss.item(), iter)
-            tb_writer.add_scalar('Error/elevation', err[0], iter)
-            tb_writer.add_scalar('Error/azimuth', err[1], iter)
-            tb_writer.add_scalar('Error/Abs elevation', np.abs(err[0]), iter)
-            tb_writer.add_scalar('Error/Abs azimuth', np.abs(err[1]), iter)
-            tb_writer.add_scalar('Estimate/elevation', temp_elev, iter)
-            tb_writer.add_scalar('Estimate/azimuth', temp_azi, iter)
-            tb_writer.add_scalar('Log/ddim_index', index, iter)
-            tb_writer.add_scalar('Log/lr', scheduler.get_last_lr()[0], iter)
-            tb_writer.add_image('Image/generated_pred_target', decode_pred_target[0], iter)
-            tb_writer.add_image('Image/generated_target_latent', decode_target_latent[0], iter)
-            
+        latent_loss_index = []
+        latent_x0_loss_index = []
+        img_loss_pred_target_index = []
+        img_loss_index = []
+        for i, iter in enumerate(pbar, start=1):
+            pbar.set_description_str(f'[{i}/{max_iter}]')
+
+            step = int(1000//75) * max(index, 0) + 1
+            # print(f'start_azimuth= {start_azimuth[iter].shape},start_elevation= {start_elevation.shape}')
+            pred_target, target_latent, pred_x0, input_latent, target_im_z = sample_model(input_im, target_im, LDModel, precision, 
+                                                        h, w, n_samples, scale, ddim_eta,
+                                                        start_elevation, start_azimuth[iter].unsqueeze(0), start_radius, step)
+            decode_pred_target = LDModel.decode_first_stage(pred_target)
+            decode_target_latent = LDModel.decode_first_stage(target_latent)
+            decode_img = LDModel.decode_first_stage(pred_x0)
+            latent_loss = nn.functional.mse_loss(pred_target, target_latent)
+            latent_x0_loss = nn.functional.mse_loss(pred_x0, target_im_z.expand_as(pred_x0))
+            img_loss = nn.functional.mse_loss(decode_img, target_im.expand_as(decode_img))
+            img_loss_pred_target = nn.functional.mse_loss(decode_pred_target, decode_target_latent)
+            latent_loss_index.append(latent_loss.item())
+            latent_x0_loss_index.append(latent_x0_loss.item())
+            img_loss_pred_target_index.append(img_loss_pred_target.item())
+            img_loss_index.append(img_loss.item())
+
+            loss = latent_loss + img_loss_pred_target
+
+            if index == max_index:
+                with torch.no_grad():
+                    temp_elev= np.rad2deg(start_elevation.item())
+                    temp_azi= np.rad2deg(start_azimuth[iter].item())
+                    temp_radius= start_radius.item()
+
+                    err = [temp_elev - np.rad2deg(gt_elevation), temp_azi - np.rad2deg(gt_azimuth), temp_radius - gt_radius]
+                    pbar.set_postfix_str(f'step: {index}-{step}, loss: {loss.item():.3f}, Err elev, azi= {err[0]:.2f}, {err[1]:.2f}, Curr= {temp_elev:.2f}, {temp_azi:.2f}')
+                    tb_writer.add_scalar('Loss/total', loss.item(), iter)
+                    tb_writer.add_scalar('Loss/img_pred_target', img_loss_pred_target.item(), iter)
+                    tb_writer.add_scalar('Loss/latent', latent_loss.item(), iter)
+                    tb_writer.add_scalar('Loss/latent_x0', latent_x0_loss.item(), iter)
+                    tb_writer.add_scalar('Loss/img', img_loss.item(), iter)
+                    tb_writer.add_scalar('Error/elevation', err[0], iter)
+                    tb_writer.add_scalar('Error/azimuth', err[1], iter)
+                    tb_writer.add_scalar('Error/Abs elevation', np.abs(err[0]), iter)
+                    tb_writer.add_scalar('Error/Abs azimuth', np.abs(err[1]), iter)
+                    tb_writer.add_scalar('Estimate/elevation', temp_elev, iter)
+                    tb_writer.add_scalar('Estimate/azimuth', temp_azi, iter)
+                    tb_writer.add_scalar('Log/ddim_index', index, iter)
+                    tb_writer.add_image('Image/generated_pred_target', decode_pred_target[0], iter)
+                    tb_writer.add_image('Image/generated_target_latent', decode_target_latent[0], iter)
+                    tb_writer.add_image('Image/generated_pred_x0', decode_img[0], iter)
+        latent_loss_all.append(latent_loss_index)
+        latent_x0_loss_all.append(latent_x0_loss_index)
+        img_loss_pred_target_all.append(img_loss_pred_target_index)
+        img_loss_all.append(img_loss_index)
+    import matplotlib.pyplot as plt
+    # import matplotlib as mpl
+    # import io
+    fig, ax = plt.subplots(figsize=(8,10))
+    # fig, ax = plt.subplots(figsize=(10,10))
+    x = np.array(azi_list) - int(np.rad2deg(gt_azimuth))
+    ax.plot(x[::5], latent_loss_all[0][::5], 'ro-', label='latent_loss')
+    ax.set_xlabel('Azimuth Error', fontsize=14)
+    ax.set_ylabel('Loss', fontsize=14)
+    ax.legend(
+        loc='best',
+        fontsize=14,
+        shadow=False,
+        facecolor='#bbb',
+        edgecolor='#000',
+        title='Loss Curve @ index35',
+        title_fontsize=14)
+    fig.savefig('../runs/imgs/lossCurve_latent_loss.png')
+    tb_writer.add_figure('LossCurve/latent_pred_target', fig, 1)
+    ax.cla()
+
+    ax.plot(x[::5], latent_x0_loss_all[0][::5], 'mo-', label='latent_loss@t0')
+    ax.set_xlabel('Azimuth Error', fontsize=14)
+    ax.set_ylabel('Loss', fontsize=14)
+    ax.legend(
+        loc='best',
+        fontsize=14,
+        shadow=False,
+        facecolor='#bbb',
+        edgecolor='#000',
+        title='Loss Curve @ index35',
+        title_fontsize=14)
+    fig.savefig('../runs/imgs/lossCurve_latent_t0_loss.png')
+    tb_writer.add_figure('LossCurve/latent_t0', fig, 1)
+    ax.cla()
+
+    ax.plot(x[::5], img_loss_pred_target_all[0][::5], 'bo-', label='img_loss')
+    ax.set_xlabel('Azimuth Error', fontsize=14)
+    ax.set_ylabel('Loss', fontsize=14)
+    ax.legend(
+        loc='best',
+        fontsize=14,
+        shadow=False,
+        facecolor='#bbb',
+        edgecolor='#000',
+        title='Loss Curve @ index35',
+        title_fontsize=14)
+    fig.savefig('../runs/imgs/lossCurve_img_loss.png')
+    tb_writer.add_figure('LossCurve/img_pred_target', fig, 1)
+    ax.cla()
+
+    ax.plot(x[::5], img_loss_all[0][::5], 'co-', label='img_loss@t0')
+    ax.set_xlabel('Azimuth Error', fontsize=14)
+    ax.set_ylabel('Loss', fontsize=14)
+    ax.legend(
+        loc='best',
+        fontsize=14,
+        shadow=False,
+        facecolor='#bbb',
+        edgecolor='#000',
+        title='Loss Curve @ index35',
+        title_fontsize=14)
+    fig.savefig('../runs/imgs/lossCurve_img_t0_loss.png')
+    tb_writer.add_figure('LossCurve/img_t0', fig, 1)
+    # a1 = ax.imshow(np.asarray(latent_loss_all), cmap='Reds', interpolation='none', extent=[-15.0, 15.0, 0, max_index])
+    # ax.set_aspect('auto')
+    # colorbar = fig.colorbar(a1, ax=ax)
+    # fig.savefig('../runs/imgs/latent_loss.png')
+    # tb_writer.add_figure('LossCurve/latent_pred_target', fig, 0)
+    # colorbar.remove()
+
+    # a2 = ax.imshow(np.asarray(img_loss_pred_target_all), cmap='Reds', interpolation='none', extent=[-15.0, 15.0, 0, max_index])
+    # ax.set_aspect('auto')
+    # colorbar = fig.colorbar(a2, ax=ax)
+    # fig.savefig('../runs/imgs/img_loss.png')
+    # tb_writer.add_figure('LossCurve/img_pred_target', fig, 0)
+    # colorbar.remove()
+
+    # a3 = ax.imshow(np.asarray(latent_x0_loss_all), cmap='Reds', interpolation='none', extent=[-15.0, 15.0, 0, max_index])
+    # ax.set_aspect('auto')
+    # colorbar = fig.colorbar(a3, ax=ax)
+    # fig.savefig('../runs/imgs/latent_t0_loss.png')
+    # tb_writer.add_figure('LossCurve/latent_t0', fig, 0)
+    # colorbar.remove()
+
+    # a4 = ax.imshow(np.asarray(img_loss_all), cmap='Reds', interpolation='none', extent=[-15.0, 15.0, 0, max_index])
+    # ax.set_aspect('auto')
+    # colorbar = fig.colorbar(a4, ax=ax)
+    # fig.savefig('../runs/imgs/img_t0_loss.png')
+    # tb_writer.add_figure('LossCurve/img_t0', fig, 0)
+    tb_writer.flush()
     return 0
     
 
@@ -404,4 +473,5 @@ if __name__ == '__main__':
              start_azimuth = np.deg2rad(rel_azi_deg),
              start_radius = conf.input.rel_radius,
              tb_writer = tb_writer,
+             n_samples= conf.model.n_samples
              )
