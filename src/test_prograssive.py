@@ -213,7 +213,7 @@ def sample_model(input_im, target_im, LDModel, precision, h, w,
             
             # before revise
             # return torch.clamp((x_prev + 1.0) / 2.0, min=0.0, max=1.0), target_latent, pred_x0, input_latent
-            return x_prev, target_latent, pred_x0, input_latent
+            return x_prev, target_latent, pred_x0, input_latent, target_im_z
 
 
 def main_run(conf,
@@ -280,7 +280,7 @@ def main_run(conf,
     pbar = tqdm(range(max_iter), desc='DDIM', total=max_iter, ncols=140)
     max_index = 35
     min_index = 0
-    interval = max_iter/(max_index - min_index + 1)
+    interval = (max_index - min_index + 1) // (max_iter//conf.model.update_input_freq)
     step_interval = int(1000//75)
     original_input_im = input_im.clone().detach()
     for i, iter in enumerate(pbar, start=1):
@@ -301,15 +301,17 @@ def main_run(conf,
         #     index = np.random.randint(10, 20)
         # else:
         #     index = np.random.randint(min_index, 10)
-        index = int(max_index - iter//interval)
+        # index = int(max_index - iter//conf.model.update_input_freq * interval)
+        index = int(max_index - iter//conf.model.update_input_freq * interval)
         # index = max_index
         step = step_interval * max(index, 0) + 1
-        pred_target, target_latent, pred_x0, input_latent = sample_model(input_im, target_im, LDModel, precision, 
+        pred_target, target_latent, pred_x0, input_latent, target_im_z = sample_model(input_im, target_im, LDModel, precision, 
                                                      h, w, n_samples, scale,
                                                      est_elev, est_azimuth, est_radius, step)
         decode_pred_target = LDModel.decode_first_stage(pred_target)
         decode_target_latent = LDModel.decode_first_stage(target_latent)
         latent_loss = nn.functional.mse_loss(pred_target, target_latent)
+        latent_x0_loss = nn.functional.mse_loss(pred_x0, target_im_z.expand_as(pred_x0))
         img_loss_pred_target = nn.functional.mse_loss(decode_pred_target, decode_target_latent)
         if conf.log and conf.log.log_all_img:
             if i % conf.log.log_all_img_freq == 0:
@@ -324,7 +326,7 @@ def main_run(conf,
                     tb_writer.add_image('Image/generated_input_latent', decode_input_latent[0], iter)
                     tb_writer.add_image('Image/generated_pred_x0', decode_img[0], iter)
                 # endregion 
-        loss = latent_loss
+        loss = latent_x0_loss
         loss.backward()
         optimizer.step()
         if conf.model.lr_scheduler.use:
@@ -352,6 +354,7 @@ def main_run(conf,
             tb_writer.add_scalar('Loss/total', loss.item(), iter)
             tb_writer.add_scalar('Loss/img_pred_target', img_loss_pred_target.item(), iter)
             tb_writer.add_scalar('Loss/latent', latent_loss.item(), iter)
+            tb_writer.add_scalar('Loss/latent_x0', latent_x0_loss.item(), iter)
             tb_writer.add_scalar('Error/elevation', err[0], iter)
             tb_writer.add_scalar('Error/azimuth', err[1], iter)
             tb_writer.add_scalar('Error/Abs elevation', np.abs(err[0]), iter)

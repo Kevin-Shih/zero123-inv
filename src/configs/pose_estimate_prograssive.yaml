@@ -1,9 +1,10 @@
 dataroot: "data/gso_turtle_my_render/"
 model: 
-  gpu_idx: 1
+  gpu_idx: 0
   model_config: "configs/sd-objaverse-finetune-c_concat-256.yaml"
   ckpt: "../105000.ckpt"
   lr: 3e-4
+  n_samples: 1
   lr_scheduler:
     use: False
     milestones: [200]
@@ -16,7 +17,7 @@ input:
   rel_azi: 0.0
   rel_radius: 0.0
 log:
-  log_root: "../runs/prograssiveInput_index35-0_azi"
+  log_root: "../runs/prograssiveInput/LatentT0Loss"
   run_name: "turtle_lr3e-4"
   log_all_img: True
   log_all_img_freq: 50
