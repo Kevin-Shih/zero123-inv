@@ -251,7 +251,7 @@ def main_run(conf,
 
                 latent_loss    = nn.functional.mse_loss(pred_target, target_latent)
                 latent_x0_loss = nn.functional.mse_loss(pred_x0, target_im_z.expand_as(pred_x0))
-                neg_latent_x0_loss = -1 * nn.functional.mse_loss(pred_x0, target_im_z.expand_as(pred_x0))
+                # neg_latent_x0_loss = -1 * nn.functional.mse_loss(pred_x0, target_im_z.expand_as(pred_x0))
                 img_loss       = nn.functional.mse_loss(decode_pred_target, decode_target_latent)
                 img_x0_loss    = nn.functional.mse_loss(decode_pred_x0, target_im.expand_as(decode_pred_x0))
                 decode_loss    = nn.functional.mse_loss(decode_target_x0, target_im.expand_as(decode_target_x0))

@@ -278,9 +278,10 @@ def main_run(conf,
     sampler = DDIMSampler(LDModel)
     from tqdm import tqdm
     pbar = tqdm(range(max_iter), desc='DDIM', total=max_iter, ncols=140)
-    max_index = 5
-    min_index = 0
-    interval = (max_index - min_index + 1) // (max_iter//conf.model.update_input_freq)
+    max_index = conf.input.max_index
+    min_index = max_index if conf.input.min_index is None else max(conf.input.min_index, 0)
+    # interval = (max_index - min_index + 1) // (max_iter//conf.model.update_input_freq)
+    interval = max_iter / (max_index - min_index + 1) / (conf.model.update_input_freq)
     step_interval = int(1000//75)
     original_input_im = input_im.clone().detach()
     for i, iter in enumerate(pbar, start=1):
@@ -302,32 +303,46 @@ def main_run(conf,
         # else:
         #     index = np.random.randint(min_index, 10)
         # index = int(max_index - iter//conf.model.update_input_freq * interval)
-        index = int(max_index - iter//conf.model.update_input_freq * interval)
+        index = int(max_index - iter//conf.model.update_input_freq//interval)
         # index = max_index
         step = step_interval * max(index, 0) + 1
         pred_target, target_latent, pred_x0, input_latent, target_im_z = sample_model(input_im, target_im, LDModel, precision, 
                                                      h, w, n_samples, scale,
                                                      est_elev, est_azimuth, est_radius, step)
-        decode_pred_target = LDModel.decode_first_stage(pred_target)
+        decode_pred_target   = LDModel.decode_first_stage(pred_target)
+        decode_pred_x0       = LDModel.decode_first_stage(pred_x0)
         decode_target_latent = LDModel.decode_first_stage(target_latent)
-        latent_loss = nn.functional.mse_loss(pred_target, target_latent)
+
+        decode_pred_target   = torch.clamp((decode_pred_target   + 1.0) / 2.0, min=0.0, max=1.0)
+        decode_pred_x0       = torch.clamp((decode_pred_x0       + 1.0) / 2.0, min=0.0, max=1.0)
+        decode_target_latent = torch.clamp((decode_target_latent + 1.0) / 2.0, min=0.0, max=1.0)
+        
+        latent_loss    = nn.functional.mse_loss(pred_target, target_latent)
         latent_x0_loss = nn.functional.mse_loss(pred_x0, target_im_z.expand_as(pred_x0))
-        img_loss_pred_target = nn.functional.mse_loss(decode_pred_target, decode_target_latent)
-        if conf.log and conf.log.log_all_img:
-            if i % conf.log.log_all_img_freq == 0:
-                # region for logging
-                with torch.no_grad():
-                    decode_img = LDModel.decode_first_stage(pred_x0)
-                    decode_input_latent = LDModel.decode_first_stage(input_latent)
-                    input_latent_loss = nn.functional.mse_loss(input_latent, target_latent)
-                    img_loss = nn.functional.mse_loss(decode_img, target_im)
-                    tb_writer.add_scalar('Loss/img', img_loss.item(), iter)
-                    tb_writer.add_scalar('Loss/input_latent', input_latent_loss.item(), iter)
-                    tb_writer.add_image('Image/generated_input_latent', decode_input_latent[0], iter)
-                    tb_writer.add_image('Image/generated_pred_x0', decode_img[0], iter)
-                # endregion 
-        loss = latent_x0_loss
+        img_loss       = nn.functional.mse_loss(decode_pred_target, decode_target_latent)
+        img_x0_loss    = nn.functional.mse_loss(decode_pred_x0, target_im.expand_as(decode_pred_x0))
+        neg_latent_x0_loss = -1.0 * latent_x0_loss
+        loss = neg_latent_x0_loss
         loss.backward()
+
+        if conf.log.log_all_img and i % conf.log.log_all_img_freq == 0:
+            # region for logging
+            with torch.no_grad():
+                decode_input_latent  = LDModel.decode_first_stage(input_latent)
+                decode_target_x0     = LDModel.decode_first_stage(target_im_z)
+
+                decode_input_latent  = torch.clamp((decode_input_latent  + 1.0) / 2.0, min=0.0, max=1.0)
+                decode_target_x0     = torch.clamp((decode_target_x0     + 1.0) / 2.0, min=0.0, max=1.0)
+                
+                input_latent_loss = nn.functional.mse_loss(input_latent, target_latent)
+                decode_loss       = nn.functional.mse_loss(decode_target_x0, target_im)
+                
+                tb_writer.add_scalar('Loss/input_latent', input_latent_loss.item(), iter)
+                tb_writer.add_scalar('Loss/decode',       decode_loss.item(),       iter)
+                tb_writer.add_image('Image/generated_input_latent', decode_input_latent[0], iter)
+                tb_writer.add_image('Image/generated_target_x0',    decode_target_x0[0],    iter)
+            # endregion 
+
         optimizer.step()
         if conf.model.lr_scheduler.use:
             scheduler.step()
@@ -351,21 +366,24 @@ def main_run(conf,
 
             err = [temp_elev - np.rad2deg(gt_elevation), temp_azi - np.rad2deg(gt_azimuth)]
             pbar.set_postfix_str(f'step: {index}-{step}, loss: {loss.item():.3f}, Err elev, azi= {err[0]:.2f}, {err[1]:.2f}, Curr= {temp_elev:.2f}, {temp_azi:.2f}')
-            tb_writer.add_scalar('Loss/total', loss.item(), iter)
-            tb_writer.add_scalar('Loss/img_pred_target', img_loss_pred_target.item(), iter)
-            tb_writer.add_scalar('Loss/latent', latent_loss.item(), iter)
-            tb_writer.add_scalar('Loss/latent_x0', latent_x0_loss.item(), iter)
+            tb_writer.add_scalar('Loss/total',         loss.item(),               iter)
+            tb_writer.add_scalar('Loss/img',           img_loss.item(),           iter)
+            tb_writer.add_scalar('Loss/img_x0',        img_x0_loss.item(),        iter)
+            tb_writer.add_scalar('Loss/latent',        latent_loss.item(),        iter)
+            tb_writer.add_scalar('Loss/latent_x0',     latent_x0_loss.item(),     iter)
+            tb_writer.add_scalar('Loss/neg_latent_x0', neg_latent_x0_loss.item(), iter)
             tb_writer.add_scalar('Error/elevation', err[0], iter)
-            tb_writer.add_scalar('Error/azimuth', err[1], iter)
+            tb_writer.add_scalar('Error/azimuth',   err[1], iter)
             tb_writer.add_scalar('Error/Abs elevation', np.abs(err[0]), iter)
-            tb_writer.add_scalar('Error/Abs azimuth', np.abs(err[1]), iter)
-            tb_writer.add_scalar('Estimate/elevation', temp_elev, iter)
-            tb_writer.add_scalar('Estimate/azimuth', temp_azi, iter)
+            tb_writer.add_scalar('Error/Abs azimuth',   np.abs(err[1]), iter)
+            tb_writer.add_scalar('Estimate/elevation',  temp_elev, iter)
+            tb_writer.add_scalar('Estimate/azimuth',    temp_azi, iter)
             tb_writer.add_scalar('Log/ddim_index', index, iter)
-            tb_writer.add_scalar('Log/lr', scheduler.get_last_lr()[0], iter)
-            tb_writer.add_image('Image/generated_pred_target', decode_pred_target[0], iter)
+            tb_writer.add_scalar('Log/lr',         scheduler.get_last_lr()[0], iter)
+            tb_writer.add_image('Image/generated_pred_target',   decode_pred_target[0],   iter)
             tb_writer.add_image('Image/generated_target_latent', decode_target_latent[0], iter)
-            
+            tb_writer.add_image('Image/generated_pred_x0',      decode_pred_x0[0],      iter)
+            tb_writer.flush() 
     return 0
     
 
