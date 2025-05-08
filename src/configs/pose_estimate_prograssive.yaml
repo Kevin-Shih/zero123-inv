@@ -12,12 +12,12 @@ model:
   update_input_freq: 50
 input:
   ref_image: "elev=0_azi=0.png"
-  target_image: "elev=0_azi=10.png"
+  target_image: "elev=0_azi=5.png"
   rel_elev: 0.0
   rel_azi: 0.0
   rel_radius: 0.0
 log:
-  log_root: "../runs/prograssiveInput/LatentT0Loss"
+  log_root: "../runs/prograssiveInput/negLatentT0Loss"
   run_name: "turtle_lr3e-4"
   log_all_img: True
   log_all_img_freq: 50

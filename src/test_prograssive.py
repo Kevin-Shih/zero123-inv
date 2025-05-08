@@ -278,7 +278,7 @@ def main_run(conf,
     sampler = DDIMSampler(LDModel)
     from tqdm import tqdm
     pbar = tqdm(range(max_iter), desc='DDIM', total=max_iter, ncols=140)
-    max_index = 35
+    max_index = 5
     min_index = 0
     interval = (max_index - min_index + 1) // (max_iter//conf.model.update_input_freq)
     step_interval = int(1000//75)
