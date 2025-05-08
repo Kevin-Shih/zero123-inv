@@ -31,8 +31,8 @@ from transformers import AutoFeatureExtractor
 def load_model_from_config(config, ckpt, device, verbose=False):
     print(f'Loading model from {ckpt}')
     pl_sd = torch.load(ckpt, map_location='cpu')
-    if 'global_step' in pl_sd:
-        print(f'Global Step: {pl_sd["global_step"]}')
+    # if 'global_step' in pl_sd:
+    #     print(f'Global Step: {pl_sd["global_step"]}')
     sd = pl_sd['state_dict']
     model = instantiate_from_config(config.model)
     if not isinstance(model, LatentDiffusion):
@@ -85,9 +85,9 @@ def preprocess_image(models, input_im, preprocess, h=256, w=256, device='cuda'):
         print('old input_im:', lo(old_size))
         print(f'Infer foreground mask (preprocess_image) took {time.time() - start_time:.3f}s.')
         print('new input_im:', lo(input_im))
-    else:
-        print(f'Infer foreground mask (preprocess_image) took {time.time() - start_time:.3f}s.')
-        # print('input_im:', lo(input_im))
+    # else:
+    #     print(f'Infer foreground mask (preprocess_image) took {time.time() - start_time:.3f}s.')
+    #     print('input_im:', lo(input_im))
     input_im = transforms.ToTensor()(input_im).unsqueeze(0).to(device)
     input_im = input_im * 2 - 1 # ??
     input_im = transforms.Resize([h, w])(input_im)
@@ -112,7 +112,7 @@ def sample_model(input_im, target_im, LDModel, precision, h, w,
     precision_scope = autocast if precision == 'autocast' else nullcontext
     with precision_scope('cuda'):
         with LDModel.ema_scope():
-            # region
+            # region prepare input
             # Set time step and noisy latent shape
             t = torch.full((n_samples,), step, device=input_im.device, dtype=torch.long)
             size = (n_samples, 4, h // 8, w // 8)
@@ -170,12 +170,8 @@ def sample_model(input_im, target_im, LDModel, precision, h, w,
             pred_x0 = (input_latent - sqrt_one_minus_at * e_t) / a_t.sqrt()
             # direction pointing to x_t
             dir_xt = (1. - a_prev - sigma_t**2).sqrt() * e_t
-            # before revise
-            # noise = sigma_t * torch.randn(size, device=img_cond.device)
             x_prev = a_prev.sqrt() * pred_x0 + dir_xt + sigma_t * _noise
-            
-            # before revise
-            # return torch.clamp((x_prev + 1.0) / 2.0, min=0.0, max=1.0), target_latent, pred_x0, input_latent
+
             return x_prev, target_latent, pred_x0, input_latent, target_im_z
 
 
@@ -192,27 +188,8 @@ def main_run(conf,
     '''
     :param raw_im (PIL Image).
     '''
-
-    # print('ddim_steps=', ddim_steps)
     raw_im.thumbnail([1536, 1536], Image.Resampling.LANCZOS)
     target_im.thumbnail([1536, 1536], Image.Resampling.LANCZOS)
-    """
-    safety_checker_input = models['clip_fe'](raw_im, return_tensors='pt').to(device)
-    (image, has_nsfw_concept) = models['nsfw'](
-        images=np.ones((1, 3)), clip_input=safety_checker_input.pixel_values)
-    print('has_nsfw_concept:', has_nsfw_concept)
-    if np.any(has_nsfw_concept):
-        print('NSFW content detected.')
-        to_return = [None] * 10
-        description = ('###  <span style="color:red"> Unfortunately, '
-                       'potential NSFW content was detected, '
-                       'which is not supported by our model. '
-                       'Please try again with a different image. </span>')
-        to_return[0] = description
-        return to_return
-    else:
-        print('Safety check passed.')
-    """
 
     input_im = preprocess_image(models, raw_im, preprocess, h=h, w=w, device=device)
     target_im = preprocess_image(models, target_im, preprocess, h=h, w=w, device=device)
@@ -220,7 +197,6 @@ def main_run(conf,
     LDModel.register_buffer('ddim_sigmas_for_original_steps', 
                             ddim_eta * torch.sqrt((1 - LDModel.alphas_cumprod_prev) / (1 - LDModel.alphas_cumprod) *
                                                   (1 - LDModel.alphas_cumprod / LDModel.alphas_cumprod_prev)))
-    # sampler = DDIMSampler(models['turncam'])
     
     # used_x = -x  # NOTE: Polar makes more sense in Basile's opinion this way!
     # used_elevation = elevation  # NOTE: Set this way for consistency.
@@ -228,77 +204,103 @@ def main_run(conf,
     start_radius = Tensor([start_radius]).to(torch.float32).to(device)
     latent_loss_all = []
     latent_x0_loss_all = []
-    img_loss_pred_target_all = []
     img_loss_all = []
+    img_loss_x0_all = []
+    decode_loss_all = []
     from tqdm import tqdm
-    azi_list =np.array([x for x in range(-300, 301, 1)]) / 10.0  + np.round(np.rad2deg(gt_azimuth),0)
+    lower_bound = int(conf.check_range[0]*10)
+    upper_bound = int(conf.check_range[1]*10)+1
+    # print(f'lower_bound= {lower_bound}, upper_bound= {upper_bound}')
+    azi_list = np.array([x for x in range(lower_bound, upper_bound, conf.check_step)]) / 10.0  + np.round(np.rad2deg(gt_azimuth),0) # all
+    # azi_list = np.array([x for x in range(-1200, 1201, 5)]) / 10.0  + np.round(np.rad2deg(gt_azimuth),0) # wider
+    # azi_list = np.array([x for x in range(-900, 901, 1)]) / 10.0  + np.round(np.rad2deg(gt_azimuth),0)   # wide
+    # azi_list = np.array([x for x in range(-300, 301, 1)]) / 10.0  + np.round(np.rad2deg(gt_azimuth),0)   # normal
+    # azi_list = np.array([x for x in range(-150, 151, 1)]) / 10.0  + np.round(np.rad2deg(gt_azimuth),0)   # narrow
     start_azimuth = Tensor(np.deg2rad(azi_list)).to(torch.float32).to(device)
     max_iter = len(azi_list)
-    max_index = 35
-    for index in range(max_index, max_index+1):
+    max_index = conf.input.max_index
+    min_index = max_index if conf.input.min_index is None else max(conf.input.min_index, 0)
+    for index in range(min_index, max_index+1):
         pbar = tqdm(range(max_iter), desc='DDIM', total=max_iter, ncols=140)
         
-
+        decode_loss_index = []
         latent_loss_index = []
         latent_x0_loss_index = []
-        img_loss_pred_target_index = []
         img_loss_index = []
+        img_loss_x0_index = []
         for i, iter in enumerate(pbar, start=1):
             pbar.set_description_str(f'[{i}/{max_iter}]')
 
             step = int(1000//75) * max(index, 0) + 1
-            # print(f'start_azimuth= {start_azimuth[iter].shape},start_elevation= {start_elevation.shape}')
-            pred_target, target_latent, pred_x0, input_latent, target_im_z = sample_model(input_im, target_im, LDModel, precision, 
-                                                        h, w, n_samples, scale, ddim_eta,
-                                                        start_elevation, start_azimuth[iter].unsqueeze(0), start_radius, step)
-            decode_pred_target = LDModel.decode_first_stage(pred_target)
-            decode_target_latent = LDModel.decode_first_stage(target_latent)
-            decode_img = LDModel.decode_first_stage(pred_x0)
-            latent_loss = nn.functional.mse_loss(pred_target, target_latent)
-            latent_x0_loss = nn.functional.mse_loss(pred_x0, target_im_z.expand_as(pred_x0))
-            img_loss = nn.functional.mse_loss(decode_img, target_im.expand_as(decode_img))
-            img_loss_pred_target = nn.functional.mse_loss(decode_pred_target, decode_target_latent)
-            latent_loss_index.append(latent_loss.item())
-            latent_x0_loss_index.append(latent_x0_loss.item())
-            img_loss_pred_target_index.append(img_loss_pred_target.item())
-            img_loss_index.append(img_loss.item())
+            with torch.no_grad():
+                pred_target, target_latent, pred_x0, input_latent, target_im_z = sample_model(input_im, target_im, LDModel, precision, 
+                                                            h, w, n_samples, scale, ddim_eta,
+                                                            start_elevation, start_azimuth[iter].unsqueeze(0), start_radius, step)
+                decode_pred_target   = LDModel.decode_first_stage(pred_target)
+                decode_input_latent  = LDModel.decode_first_stage(input_latent)
+                decode_target_latent = LDModel.decode_first_stage(target_latent)
 
-            loss = latent_loss + img_loss_pred_target
+                decode_target_x0     = LDModel.decode_first_stage(target_im_z)
+                decode_pred_x0       = LDModel.decode_first_stage(pred_x0)
 
-            if index == max_index:
-                with torch.no_grad():
-                    temp_elev= np.rad2deg(start_elevation.item())
-                    temp_azi= np.rad2deg(start_azimuth[iter].item())
-                    temp_radius= start_radius.item()
+                decode_pred_target   = torch.clamp((decode_pred_target   + 1.0) / 2.0, min=0.0, max=1.0)
+                decode_input_latent  = torch.clamp((decode_input_latent  + 1.0) / 2.0, min=0.0, max=1.0)
+                decode_target_latent = torch.clamp((decode_target_latent + 1.0) / 2.0, min=0.0, max=1.0)
+                decode_target_x0     = torch.clamp((decode_target_x0     + 1.0) / 2.0, min=0.0, max=1.0)
+                decode_pred_x0       = torch.clamp((decode_pred_x0       + 1.0) / 2.0, min=0.0, max=1.0)
 
-                    err = [temp_elev - np.rad2deg(gt_elevation), temp_azi - np.rad2deg(gt_azimuth), temp_radius - gt_radius]
-                    pbar.set_postfix_str(f'step: {index}-{step}, loss: {loss.item():.3f}, Err elev, azi= {err[0]:.2f}, {err[1]:.2f}, Curr= {temp_elev:.2f}, {temp_azi:.2f}')
-                    tb_writer.add_scalar('Loss/total', loss.item(), iter)
-                    tb_writer.add_scalar('Loss/img_pred_target', img_loss_pred_target.item(), iter)
-                    tb_writer.add_scalar('Loss/latent', latent_loss.item(), iter)
-                    tb_writer.add_scalar('Loss/latent_x0', latent_x0_loss.item(), iter)
-                    tb_writer.add_scalar('Loss/img', img_loss.item(), iter)
-                    tb_writer.add_scalar('Error/elevation', err[0], iter)
-                    tb_writer.add_scalar('Error/azimuth', err[1], iter)
-                    tb_writer.add_scalar('Error/Abs elevation', np.abs(err[0]), iter)
-                    tb_writer.add_scalar('Error/Abs azimuth', np.abs(err[1]), iter)
-                    tb_writer.add_scalar('Estimate/elevation', temp_elev, iter)
-                    tb_writer.add_scalar('Estimate/azimuth', temp_azi, iter)
-                    tb_writer.add_scalar('Log/ddim_index', index, iter)
-                    tb_writer.add_image('Image/generated_pred_target', decode_pred_target[0], iter)
-                    tb_writer.add_image('Image/generated_target_latent', decode_target_latent[0], iter)
-                    tb_writer.add_image('Image/generated_pred_x0', decode_img[0], iter)
+                latent_loss    = nn.functional.mse_loss(pred_target, target_latent)
+                latent_x0_loss = nn.functional.mse_loss(pred_x0, target_im_z.expand_as(pred_x0))
+                neg_latent_x0_loss = -1 * nn.functional.mse_loss(pred_x0, target_im_z.expand_as(pred_x0))
+                img_loss       = nn.functional.mse_loss(decode_pred_target, decode_target_latent)
+                img_x0_loss    = nn.functional.mse_loss(decode_pred_x0, target_im.expand_as(decode_pred_x0))
+                decode_loss    = nn.functional.mse_loss(decode_target_x0, target_im.expand_as(decode_target_x0))
+                
+                latent_loss_index.append(latent_loss.item())
+                latent_x0_loss_index.append(latent_x0_loss.item())
+                img_loss_index.append(img_loss.item())
+                img_loss_x0_index.append(img_x0_loss.item())
+                decode_loss_index.append(decode_loss.item())
+
+                total_loss = latent_loss + img_loss
+                # region logging
+            # if index == max_index:
+                temp_elev= np.rad2deg(start_elevation.item())
+                temp_azi= np.rad2deg(start_azimuth[iter].item())
+                temp_radius= start_radius.item()
+
+                err = [temp_elev - np.rad2deg(gt_elevation), temp_azi - np.rad2deg(gt_azimuth), temp_radius - gt_radius]
+                pbar.set_postfix_str(f'step: {index}-{step}, loss: {total_loss.item():.3f}, Err elev, azi= {err[0]:.2f}, {err[1]:.2f}, Curr= {temp_elev:.2f}, {temp_azi:.2f}')
+                tb_writer.add_scalar('Loss/total',      total_loss.item(),     iter)
+                tb_writer.add_scalar('Loss/img',        img_loss.item(),       iter)
+                tb_writer.add_scalar('Loss/latent',     latent_loss.item(),    iter)
+                tb_writer.add_scalar('Loss/latent_x0',  latent_x0_loss.item(), iter)
+                tb_writer.add_scalar('Loss/img_x0',     img_x0_loss.item(),    iter)
+                tb_writer.add_scalar('Loss/decode',     decode_loss.item(),    iter)
+                tb_writer.add_scalar('Error/elevation', err[0],         iter)
+                tb_writer.add_scalar('Error/azimuth',   err[1],         iter)
+                tb_writer.add_scalar('Error/Abs elev',  np.abs(err[0]), iter)
+                tb_writer.add_scalar('Error/Abs azi',   np.abs(err[1]), iter)
+                tb_writer.add_scalar('Estimate/elev',   temp_elev,      iter)
+                tb_writer.add_scalar('Estimate/azi',    temp_azi,       iter)
+                tb_writer.add_scalar('Log/ddim_index',  index,          iter)
+                tb_writer.add_image('Image/generated_pred_target',   decode_pred_target[0],   iter)
+                tb_writer.add_image('Image/generated_target_latent', decode_target_latent[0], iter)
+                tb_writer.add_image('Image/generated_pred_x0',       decode_pred_x0[0],       iter)
+                tb_writer.add_image('Image/generated_input_x0',      decode_input_latent[0],  iter)
+                tb_writer.add_image('Image/generated_target_x0',     decode_target_x0[0],     iter)
+                # endregion
         latent_loss_all.append(latent_loss_index)
         latent_x0_loss_all.append(latent_x0_loss_index)
-        img_loss_pred_target_all.append(img_loss_pred_target_index)
         img_loss_all.append(img_loss_index)
+        img_loss_x0_all.append(img_loss_x0_index)
+        decode_loss_all.append(decode_loss_index)
+    # region plotting
     import matplotlib.pyplot as plt
-    # import matplotlib as mpl
-    # import io
     fig, ax = plt.subplots(figsize=(8,10))
     # fig, ax = plt.subplots(figsize=(10,10))
     x = np.array(azi_list) - int(np.rad2deg(gt_azimuth))
-    ax.plot(x[::5], latent_loss_all[0][::5], 'ro-', label='latent_loss')
+    ax.plot(x[::1], latent_loss_all[0][::1], 'ro-', label='latent_loss')
     ax.set_xlabel('Azimuth Error', fontsize=14)
     ax.set_ylabel('Loss', fontsize=14)
     ax.legend(
@@ -307,13 +309,13 @@ def main_run(conf,
         shadow=False,
         facecolor='#bbb',
         edgecolor='#000',
-        title='Loss Curve @ index35',
+        title=f'Loss Curve @ index{max_index}',
         title_fontsize=14)
-    fig.savefig('../runs/imgs/lossCurve_latent_loss.png')
+    # fig.savefig('../runs/imgs/lossCurve_latent_loss.png')
     tb_writer.add_figure('LossCurve/latent_pred_target', fig, 1)
     ax.cla()
 
-    ax.plot(x[::5], latent_x0_loss_all[0][::5], 'mo-', label='latent_loss@t0')
+    ax.plot(x[::1], latent_x0_loss_all[0][::1], 'mo-', label='latent_loss@t0')
     ax.set_xlabel('Azimuth Error', fontsize=14)
     ax.set_ylabel('Loss', fontsize=14)
     ax.legend(
@@ -322,13 +324,13 @@ def main_run(conf,
         shadow=False,
         facecolor='#bbb',
         edgecolor='#000',
-        title='Loss Curve @ index35',
+        title=f'Loss Curve @ index{max_index}',
         title_fontsize=14)
-    fig.savefig('../runs/imgs/lossCurve_latent_t0_loss.png')
+    # fig.savefig('../runs/imgs/lossCurve_latent_t0_loss.png')
     tb_writer.add_figure('LossCurve/latent_t0', fig, 1)
     ax.cla()
 
-    ax.plot(x[::5], img_loss_pred_target_all[0][::5], 'bo-', label='img_loss')
+    ax.plot(x[::1], img_loss_all[0][::1], 'bo-', label='img_loss')
     ax.set_xlabel('Azimuth Error', fontsize=14)
     ax.set_ylabel('Loss', fontsize=14)
     ax.legend(
@@ -337,13 +339,13 @@ def main_run(conf,
         shadow=False,
         facecolor='#bbb',
         edgecolor='#000',
-        title='Loss Curve @ index35',
+        title=f'Loss Curve @ index{max_index}',
         title_fontsize=14)
-    fig.savefig('../runs/imgs/lossCurve_img_loss.png')
+    # fig.savefig('../runs/imgs/lossCurve_img_loss.png')
     tb_writer.add_figure('LossCurve/img_pred_target', fig, 1)
     ax.cla()
 
-    ax.plot(x[::5], img_loss_all[0][::5], 'co-', label='img_loss@t0')
+    ax.plot(x[::1], img_loss_x0_all[0][::1], 'co-', label='img_loss@t0')
     ax.set_xlabel('Azimuth Error', fontsize=14)
     ax.set_ylabel('Loss', fontsize=14)
     ax.legend(
@@ -352,9 +354,9 @@ def main_run(conf,
         shadow=False,
         facecolor='#bbb',
         edgecolor='#000',
-        title='Loss Curve @ index35',
+        title=f'Loss Curve @ index{max_index}',
         title_fontsize=14)
-    fig.savefig('../runs/imgs/lossCurve_img_t0_loss.png')
+    # fig.savefig('../runs/imgs/lossCurve_img_t0_loss.png')
     tb_writer.add_figure('LossCurve/img_t0', fig, 1)
     # a1 = ax.imshow(np.asarray(latent_loss_all), cmap='Reds', interpolation='none', extent=[-15.0, 15.0, 0, max_index])
     # ax.set_aspect('auto')
@@ -363,7 +365,7 @@ def main_run(conf,
     # tb_writer.add_figure('LossCurve/latent_pred_target', fig, 0)
     # colorbar.remove()
 
-    # a2 = ax.imshow(np.asarray(img_loss_pred_target_all), cmap='Reds', interpolation='none', extent=[-15.0, 15.0, 0, max_index])
+    # a2 = ax.imshow(np.asarray(img_loss_all), cmap='Reds', interpolation='none', extent=[-15.0, 15.0, 0, max_index])
     # ax.set_aspect('auto')
     # colorbar = fig.colorbar(a2, ax=ax)
     # fig.savefig('../runs/imgs/img_loss.png')
@@ -377,25 +379,17 @@ def main_run(conf,
     # tb_writer.add_figure('LossCurve/latent_t0', fig, 0)
     # colorbar.remove()
 
-    # a4 = ax.imshow(np.asarray(img_loss_all), cmap='Reds', interpolation='none', extent=[-15.0, 15.0, 0, max_index])
+    # a4 = ax.imshow(np.asarray(img_loss_x0_all), cmap='Reds', interpolation='none', extent=[-15.0, 15.0, 0, max_index])
     # ax.set_aspect('auto')
     # colorbar = fig.colorbar(a4, ax=ax)
     # fig.savefig('../runs/imgs/img_t0_loss.png')
     # tb_writer.add_figure('LossCurve/img_t0', fig, 0)
+    # endregion
     tb_writer.flush()
     return 0
     
 
 if __name__ == '__main__':
-    '''
-    python test.py --ckpt ../105000.ckpt 
-        --ref_image_path "data/gso_alarm_my_render/elev=0_azi=0.png" 
-        --target_image_path "data/gso_alarm_my_render/elev=0_azi=10.png" 
-        --rel_elevation_in_degree 0.0 
-        --rel_azimuth_in_degree 0.0 
-        --rel_radius 0.0
-        --run_name test
-    '''
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "-c",
@@ -407,6 +401,9 @@ if __name__ == '__main__':
     args = parser.parse_args()
     print(f'Loading configs from {os.path.basename(args.config)}')
     conf = OmegaConf.load(args.config)
+    print()
+    print(OmegaConf.to_yaml(conf))
+    
     ref_image_path = os.path.join(conf.dataroot, conf.input.ref_image)
     target_image_path = os.path.join(conf.dataroot, conf.input.target_image)
     rel_elev_deg = conf.input.rel_elev
@@ -418,21 +415,18 @@ if __name__ == '__main__':
     assert os.path.exists(conf.model.ckpt)
     assert os.path.exists(ref_image_path)
 
-    # Instantiate all models beforehand for efficiency.
+    # region Instantiate all models beforehand for efficiency.
     models = dict()
     print('Instantiating LatentDiffusion...')
     models['turncam'] = load_model_from_config(model_config_obj, conf.model.ckpt, device=device, verbose=True)
     print('Instantiating Carvekit HiInterface...')
     models['carvekit'] = create_carvekit_interface()
-    """
-    print('Instantiating StableDiffusionSafetyChecker...')
-    models['nsfw'] = StableDiffusionSafetyChecker.from_pretrained(
-        'CompVis/stable-diffusion-safety-checker').to(device)
-    """
     print('Instantiating AutoFeatureExtractor...')
     models['clip_fe'] = AutoFeatureExtractor.from_pretrained(
         'CompVis/stable-diffusion-safety-checker')
+    # endregion
 
+    # region Load images and set gt
     ref_image = Image.open(ref_image_path)
     target_image = Image.open(target_image_path)
     gt_elev = 0
@@ -440,12 +434,13 @@ if __name__ == '__main__':
     match1 = re.search(r"elev=(-?[\d.]+)_azi=(-?[\d.]+)", ref_image_path)
     match2 = re.search(r"elev=(-?[\d.]+)_azi=(-?[\d.]+)", target_image_path)
     if match1 and match2:
-        print(f"start_rel: elev= {rel_elev_deg}, azi= {rel_azi_deg}")
+        print(f"start_rel: elev= {rel_elev_deg:5.1f}, azi= {rel_azi_deg:5.1f}")
         gt_elev = float(match2.group(1)) - float(match1.group(1))
         gt_azi = float(match2.group(2)) - float(match1.group(2))
         if gt_azi > 180:
             gt_azi -= 360
-        print(f"gt_rel: elev= {gt_elev}, azi= {gt_azi}")
+        print(f"gt_rel:    elev= {gt_elev:5.1f}, azi= {gt_azi:5.1f}")
+    # endregion
 
     # region tb_writer setup
     curr_time = time.localtime(time.time())
@@ -461,7 +456,7 @@ if __name__ == '__main__':
                       f'_st-{rel_elev_deg:.0f}-{rel_azi_deg:.0f}'
     tb_writer = writer.SummaryWriter(writer_name)
     # endregion
-
+    
     main_run(conf = conf,
              raw_im = ref_image, target_im = target_image,
              models = models, device = device,
