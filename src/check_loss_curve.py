@@ -14,7 +14,7 @@ import torch
 from contextlib import nullcontext
 # from diffusers.pipelines.stable_diffusion import StableDiffusionSafetyChecker
 # from einops import rearrange
-# from ldm.models.diffusion.ddim import DDIMSampler
+from ldm.models.diffusion.ddim import DDIMSampler
 from ldm.models.diffusion.ddpm import LatentDiffusion
 from ldm.util import create_carvekit_interface, load_and_preprocess, instantiate_from_config
 from lovely_numpy import lo
@@ -106,15 +106,32 @@ def calculate_param(LDModel, step, n_samples, device):
     sqrt_one_minus_at = torch.full((n_samples, 1, 1, 1), sqrt_one_minus_alphas[step],device=device)    
     return a_t, a_prev, sigma_t, sqrt_one_minus_at
 
+def calculate_param_ddim(sampler, index, n_samples, device):
+    alphas = sampler.ddim_alphas
+    alphas_prev = sampler.ddim_alphas_prev
+    sqrt_one_minus_alphas = sampler.ddim_sqrt_one_minus_alphas
+    sigmas = sampler.ddim_sigmas
+    # print(index, alphas.shape)
+    # select parameters corresponding to the currently considered timestep
+    a_t = torch.full((n_samples, 1, 1, 1), alphas[index], device=device)
+    a_prev = torch.full((n_samples, 1, 1, 1), alphas_prev[index], device=device)
+    sigma_t = torch.full((n_samples, 1, 1, 1), sigmas[index], device=device)
+    sqrt_one_minus_at = torch.full((n_samples, 1, 1, 1), sqrt_one_minus_alphas[index],device=device)    
+    return a_t, a_prev, sigma_t, sqrt_one_minus_at
+
 def sample_model(input_im, target_im, LDModel, precision, h, w,
                  n_samples, scale, ddim_eta,
-                 elevation, azimuth, radius, step=651):
+                 elevation, azimuth, radius, index = None, step=651):
+    sampler = DDIMSampler(LDModel)
+    sampler.make_schedule(ddim_num_steps=75, ddim_eta=ddim_eta, verbose=False)
+    # if index is not None:
+    #     step = np.flip(sampler.ddim_timesteps)[index]
     precision_scope = autocast if precision == 'autocast' else nullcontext
     with precision_scope('cuda'):
         with LDModel.ema_scope():
             # region prepare input
             # Set time step and noisy latent shape
-            t = torch.full((n_samples,), step, device=input_im.device, dtype=torch.long)
+            t = torch.full((n_samples,), step, device=input_im.device, dtype=torch.long) # type: ignore
             size = (n_samples, 4, h // 8, w // 8)
             # Get input & target latent
             input_encoder_posterior = LDModel.encode_first_stage(input_im)
@@ -165,7 +182,8 @@ def sample_model(input_im, target_im, LDModel, precision, h, w,
                 e_t_uncond, e_t = LDModel.apply_model(x_in, t_in, c_in).chunk(2)
                 e_t = e_t_uncond + scale * (e_t - e_t_uncond)
             
-            a_t, a_prev, sigma_t, sqrt_one_minus_at = calculate_param(LDModel, step, n_samples, img_cond.device)
+            # a_t, a_prev, sigma_t, sqrt_one_minus_at = calculate_param(LDModel, step, n_samples, img_cond.device)
+            a_t, a_prev, sigma_t, sqrt_one_minus_at = calculate_param_ddim(sampler, index, n_samples, img_cond.device)
             # current prediction for x_0
             pred_x0 = (input_latent - sqrt_one_minus_at * e_t) / a_t.sqrt()
             # direction pointing to x_t
@@ -235,7 +253,7 @@ def main_run(conf,
             with torch.no_grad():
                 pred_target, target_latent, pred_x0, input_latent, target_im_z = sample_model(input_im, target_im, LDModel, precision, 
                                                             h, w, n_samples, scale, ddim_eta,
-                                                            start_elevation, start_azimuth[iter].unsqueeze(0), start_radius, step)
+                                                            start_elevation, start_azimuth[iter].unsqueeze(0), start_radius, index, step)
                 decode_pred_target   = LDModel.decode_first_stage(pred_target)
                 decode_input_latent  = LDModel.decode_first_stage(input_latent)
                 decode_target_latent = LDModel.decode_first_stage(target_latent)
@@ -284,11 +302,11 @@ def main_run(conf,
                 tb_writer.add_scalar('Estimate/elev',   temp_elev,      iter)
                 tb_writer.add_scalar('Estimate/azi',    temp_azi,       iter)
                 tb_writer.add_scalar('Log/ddim_index',  index,          iter)
-                tb_writer.add_image('Image/generated_pred_target',   decode_pred_target[0],   iter)
+                tb_writer.add_image('Image/generated_input_latent',  decode_input_latent[0],  iter)
                 tb_writer.add_image('Image/generated_target_latent', decode_target_latent[0], iter)
-                tb_writer.add_image('Image/generated_pred_x0',       decode_pred_x0[0],       iter)
-                tb_writer.add_image('Image/generated_input_x0',      decode_input_latent[0],  iter)
                 tb_writer.add_image('Image/generated_target_x0',     decode_target_x0[0],     iter)
+                tb_writer.add_image('Image/generated_pred_target',   decode_pred_target[0],   iter)
+                tb_writer.add_image('Image/generated_pred_x0',       decode_pred_x0[0],       iter)
                 # endregion
         latent_loss_all.append(latent_loss_index)
         latent_x0_loss_all.append(latent_x0_loss_index)
@@ -468,5 +486,7 @@ if __name__ == '__main__':
              start_azimuth = np.deg2rad(rel_azi_deg),
              start_radius = conf.input.rel_radius,
              tb_writer = tb_writer,
-             n_samples= conf.model.n_samples
+             n_samples= conf.model.n_samples,
+             scale= conf.model.guide_scale,
+             ddim_eta= conf.model.ddim_eta,
              )

@@ -9,17 +9,19 @@ model:
     use: False
     milestones: [200]
     gamma: 0.2
+  guide_scale: 10.0
+  ddim_eta: 0.1
 input:
   ref_image: "elev=0_azi=0.png"
-  target_image: "elev=0_azi=15.png"
+  target_image: "elev=0_azi=0.png"
   rel_elev: 0.0
   rel_azi: 0.0
   rel_radius: 0.0
-  max_index: 7
+  max_index: 1
   min_index: null
 log:
   log_root: "../runs/loss_check_all"
-  run_name: "turtle_clamp_step5_index7"
+  run_name: "sampler_guide10_step5_index1_eta0.1"
   # log_all_img: True
   # log_all_img_freq: 10
 comment: ""

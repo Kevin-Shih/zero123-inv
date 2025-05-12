@@ -3,8 +3,8 @@ model:
   gpu_idx: 0
   model_config: "configs/sd-objaverse-finetune-c_concat-256.yaml"
   ckpt: "../105000.ckpt"
-  lr: 3e-4
-  n_samples: 4
+  lr: 1e-3
+  n_samples: 1
   lr_scheduler:
     use: False
     milestones: [200]
@@ -19,8 +19,8 @@ input:
   max_index: 5
   min_index: 0
 log:
-  log_root: "../runs/prograssiveInput/negLatentT0Loss"
-  run_name: "turtle_lr3e-4"
+  log_root: "../runs/prograssiveInput/LatentLoss"
+  run_name: "turtle_n1_lr1e-3"
   log_all_img: True
   log_all_img_freq: 10
-comment: ""
+comment: "(待) 改為 ddim sampler index instead of ddpm step"

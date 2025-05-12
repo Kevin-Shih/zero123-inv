@@ -83,8 +83,8 @@ def preprocess_image(models, input_im, preprocess, h=256, w=256, device='cuda'):
         print('old input_im:', lo(old_size))
         print(f'Infer foreground mask (preprocess_image) took {time.time() - start_time:.3f}s.')
         print('new input_im:', lo(input_im))
-    else:
-        print(f'Infer foreground mask (preprocess_image) took {time.time() - start_time:.3f}s.')
+    # else:
+        # print(f'Infer foreground mask (preprocess_image) took {time.time() - start_time:.3f}s.')
         # print('input_im:', lo(input_im))
     input_im = transforms.ToTensor()(input_im).unsqueeze(0).to(device)
     input_im = input_im * 2 - 1 # ??
@@ -322,7 +322,7 @@ def main_run(conf,
         img_loss       = nn.functional.mse_loss(decode_pred_target, decode_target_latent)
         img_x0_loss    = nn.functional.mse_loss(decode_pred_x0, target_im.expand_as(decode_pred_x0))
         neg_latent_x0_loss = -1.0 * latent_x0_loss
-        loss = neg_latent_x0_loss
+        loss = latent_loss
         loss.backward()
 
         if conf.log.log_all_img and i % conf.log.log_all_img_freq == 0:
@@ -406,8 +406,11 @@ if __name__ == '__main__':
         help="path to configs to load OmegaConf from"
     )
     args = parser.parse_args()
-    print(f'Loading configs from {os.path.basename(args.config)}')
+    print(f'Loading configs from {os.path.basename(args.config)}:')
     conf = OmegaConf.load(args.config)
+    print()
+    print(OmegaConf.to_yaml(conf))
+
     ref_image_path = os.path.join(conf.dataroot, conf.input.ref_image)
     target_image_path = os.path.join(conf.dataroot, conf.input.target_image)
     rel_elev_deg = conf.input.rel_elev
