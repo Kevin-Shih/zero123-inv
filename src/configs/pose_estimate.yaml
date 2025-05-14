@@ -1,22 +1,27 @@
 dataroot: "data/gso_turtle_my_render/"
 model: 
-  gpu_idx: 1
+  gpu_idx: 0
   model_config: "configs/sd-objaverse-finetune-c_concat-256.yaml"
   ckpt: "../105000.ckpt"
-  lr: 5e-4
+  n_samples: 1
+  lr: 3e-4
   lr_scheduler:
     use: False
     milestones: [200]
     gamma: 0.2
+  guide_scale: 10.0
+  ddim_eta: 0.1
 input:
   ref_image: "elev=0_azi=0.png"
-  target_image: "elev=0_azi=10.png"
+  target_image: "elev=0_azi=5.png"
   rel_elev: 0.0
   rel_azi: 0.0
   rel_radius: 0.0
+  max_index: 1
+  min_index: null
 log:
-  log_root: "../runs/randIndex_wImgLoss_azi"
-  run_name: "turtle_lr5e-4"
+  log_root: "../runs/fixInput/LatentLoss"
+  run_name: "sampler_guide10_index1_eta0.1"
   log_all_img: True
-  log_all_img_freq: 50
+  log_all_img_freq: 10
 comment: ""

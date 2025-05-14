@@ -13,7 +13,7 @@ model:
   ddim_eta: 0.1
 input:
   ref_image: "elev=0_azi=0.png"
-  target_image: "elev=0_azi=0.png"
+  target_image: "elev=0_azi=30.png"
   rel_elev: 0.0
   rel_azi: 0.0
   rel_radius: 0.0
