@@ -11,7 +11,6 @@ import torch
 from contextlib import nullcontext
 # from diffusers.pipelines.stable_diffusion import StableDiffusionSafetyChecker
 # from einops import rearrange
-# from ldm.models.diffusion.ddim import DDIMSampler
 from ldm.models.diffusion.ddim import DDIMSampler
 from ldm.models.diffusion.ddpm import LatentDiffusion
 from ldm.util import create_carvekit_interface, load_and_preprocess, instantiate_from_config
@@ -46,9 +45,6 @@ def load_model_from_config(config, ckpt, device, verbose=False):
 
     model.to(device)
     model.train()
-    # print(type(model))
-    # # for p in model.parameters():
-    #     # p.requires_grad = False
     return model
 
 def preprocess_image(models, input_im, preprocess, h=256, w=256, device='cuda'):
@@ -118,11 +114,14 @@ def calculate_param_ddim(sampler, index, n_samples, device):
     return a_t, a_prev, sigma_t, sqrt_one_minus_at
 
 def sample_model(input_im, target_im, LDModel, precision, h, w,
-                 n_samples, scale, ddim_eta,
-                 elevation, azimuth, radius, index = None, step=651):
+                 elevation, azimuth, radius, n_samples, 
+                 scale = 3.0, ddim_steps= 75, ddim_eta= 0.15, index = 5):
+    assert scale > 1.0
+    step = int(1000//ddim_steps) * max(index, 0) + 1
+    step_target_inter = int(1000//ddim_steps) if index > 0 else 1
     precision_scope = autocast if precision == 'autocast' else nullcontext
     sampler = DDIMSampler(LDModel)
-    sampler.make_schedule(ddim_num_steps=75, ddim_eta=ddim_eta, verbose=False)
+    sampler.make_schedule(ddim_num_steps=ddim_steps, ddim_eta=ddim_eta, verbose=False)
     with precision_scope('cuda'):
         with LDModel.ema_scope():
             # region
@@ -136,8 +135,9 @@ def sample_model(input_im, target_im, LDModel, precision, h, w,
             target_im_z = LDModel.get_first_stage_encoding(target_encoder_posterior)
             # Add noise to the input latent and target latent
             _noise = torch.randn_like(input_im_z)
-            input_latent = LDModel.q_sample(input_im_z, t, _noise)
-            target_latent = LDModel.q_sample(target_im_z, t-1, _noise)
+            _perfect_input = target_im_z.clone().detach()
+            input_latent = LDModel.q_sample(_perfect_input, t, _noise)
+            target_latent = LDModel.q_sample(target_im_z, t - step_target_inter, _noise)
             # Get condintioning
             img_cond = LDModel.get_learned_conditioning(input_im).tile(n_samples, 1, 1)
             T = torch.cat([elevation, torch.sin(azimuth), torch.cos(azimuth), radius])
@@ -147,35 +147,30 @@ def sample_model(input_im, target_im, LDModel, precision, h, w,
             cond = {}
             cond['c_crossattn'] = [c_proj]
             cond['c_concat'] = [input_encoder_posterior.mode().repeat(n_samples, 1, 1, 1)]
-            if scale != 1.0:
-                uc = {}
-                uc['c_concat'] = [torch.zeros(size, device=img_cond.device)]
-                uc['c_crossattn'] = [torch.zeros_like(c_proj, device=img_cond.device)]
-            else:
-                uc = None
+            uc = {}
+            uc['c_concat'] = [torch.zeros(size, device=img_cond.device)]
+            uc['c_crossattn'] = [torch.zeros_like(c_proj, device=img_cond.device)]
+
             # endregion
 
             # print(f'conditioning_key= {LDModel.model.conditioning_key}')
             # print(f"target_im_z={target_im_z.shape}, target_latent={target_latent.shape}")
-            if uc is None or scale == 1.:
-                e_t = LDModel.apply_model(input_latent, t, cond)
+            x_in = torch.cat([input_latent] * 2)
+            t_in = torch.cat([t] * 2)
+            if isinstance(cond, dict):
+                assert isinstance(uc, dict)
+                c_in = dict()
+                for k in cond:
+                    if isinstance(cond[k], list):
+                        c_in[k] = [torch.cat([uc[k][i],
+                                    cond[k][i]]) for i in range(len(cond[k]))]
+                    else:
+                        c_in[k] = torch.cat([uc[k], cond[k]])
             else:
-                x_in = torch.cat([input_latent] * 2)
-                t_in = torch.cat([t] * 2)
-                if isinstance(cond, dict):
-                    assert isinstance(uc, dict)
-                    c_in = dict()
-                    for k in cond:
-                        if isinstance(cond[k], list):
-                            c_in[k] = [torch.cat([uc[k][i],
-                                       cond[k][i]]) for i in range(len(cond[k]))]
-                        else:
-                            c_in[k] = torch.cat([uc[k], cond[k]])
-                else:
-                    assert not isinstance(uc, dict)
-                    c_in = torch.cat([uc, cond])
-                e_t_uncond, e_t = LDModel.apply_model(x_in, t_in, c_in).chunk(2)
-                e_t = e_t_uncond + scale * (e_t - e_t_uncond)
+                assert not isinstance(uc, dict)
+                c_in = torch.cat([uc, cond])
+            e_t_uncond, e_t = LDModel.apply_model(x_in, t_in, c_in).chunk(2)
+            e_t = e_t_uncond + scale * (e_t - e_t_uncond)
             
             a_t, a_prev, sigma_t, sqrt_one_minus_at = calculate_param_ddim(sampler, index, n_samples, img_cond.device)
             # a_t, a_prev, sigma_t, sqrt_one_minus_at = calculate_param(LDModel, step, n_samples, img_cond.device)
@@ -231,9 +226,9 @@ def main_run(conf,
     input_im = preprocess_image(models, raw_im, preprocess, h=h, w=w, device=device)
     target_im = preprocess_image(models, target_im, preprocess, h=h, w=w, device=device)
     LDModel = models['turncam']
-    LDModel.register_buffer('ddim_sigmas_for_original_steps', 
-                            ddim_eta * torch.sqrt((1 - LDModel.alphas_cumprod_prev) / (1 - LDModel.alphas_cumprod) *
-                                                  (1 - LDModel.alphas_cumprod / LDModel.alphas_cumprod_prev)))
+    # LDModel.register_buffer('ddim_sigmas_for_original_steps', 
+    #                         ddim_eta * torch.sqrt((1 - LDModel.alphas_cumprod_prev) / (1 - LDModel.alphas_cumprod) *
+    #                                               (1 - LDModel.alphas_cumprod / LDModel.alphas_cumprod_prev)))
     
     # used_x = -x  # NOTE: Polar makes more sense in Basile's opinion this way!
     # used_elevation = elevation  # NOTE: Set this way for consistency.
@@ -256,7 +251,6 @@ def main_run(conf,
     max_index = conf.input.max_index
     min_index = max_index if conf.input.min_index is None else max(conf.input.min_index, 0)
     interval = max_iter / (max_index - min_index + 1)
-    step_interval = int(1000//75)
     for i, iter in enumerate(pbar, start=1):
         pbar.set_description_str(f'[{iter}/{max_iter}]')
         optimizer.zero_grad()
@@ -269,10 +263,10 @@ def main_run(conf,
         #     index = np.random.randint(min_index, 10)
         index = int(max_index - iter//interval)
         # index = max_index
-        step = step_interval * max(index, 0) + 1
+        step = int(1000//75) * max(index, 0) + 1
         pred_target, target_latent, pred_x0, input_latent, target_im_z = sample_model(input_im, target_im, LDModel, precision, 
-                                                     h, w, n_samples, scale, ddim_eta,
-                                                     est_elev, est_azimuth, est_radius, index= index, step= step)
+                                                     h, w, est_elev, est_azimuth, est_radius, n_samples= n_samples, scale= scale,
+                                                     ddim_steps= ddim_steps, ddim_eta= ddim_eta, index= index)
         decode_pred_target   = LDModel.decode_first_stage(pred_target)
         decode_pred_x0       = LDModel.decode_first_stage(pred_x0)
         decode_target_latent = LDModel.decode_first_stage(target_latent)

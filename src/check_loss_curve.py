@@ -120,12 +120,14 @@ def calculate_param_ddim(sampler, index, n_samples, device):
     return a_t, a_prev, sigma_t, sqrt_one_minus_at
 
 def sample_model(input_im, target_im, LDModel, precision, h, w,
-                 n_samples, scale, ddim_eta,
-                 elevation, azimuth, radius, index = None, step=651):
+                 elevation, azimuth, radius, n_samples, 
+                 scale = 3.0, ddim_steps= 75, ddim_eta= 0.15, index = 5):
     sampler = DDIMSampler(LDModel)
     sampler.make_schedule(ddim_num_steps=75, ddim_eta=ddim_eta, verbose=False)
     # if index is not None:
     #     step = np.flip(sampler.ddim_timesteps)[index]
+    step = int(1000//ddim_steps) * max(index, 0) + 1
+    step_target_inter = int(1000//ddim_steps) if index > 0 else 1
     precision_scope = autocast if precision == 'autocast' else nullcontext
     with precision_scope('cuda'):
         with LDModel.ema_scope():
@@ -141,8 +143,10 @@ def sample_model(input_im, target_im, LDModel, precision, h, w,
             # Add noise to the input latent and target latent
             # _noise = torch.randn_like(input_im_z)
             _noise = torch.randn(size, device=input_im_z.device)
-            input_latent = LDModel.q_sample(input_im_z, t, _noise)
-            target_latent = LDModel.q_sample(target_im_z, t-1, _noise)
+            _perfect_input = target_im_z.clone().detach()
+            input_latent = LDModel.q_sample(_perfect_input, t, _noise)
+            # input_latent = LDModel.q_sample(input_im_z, t, _noise)
+            target_latent = LDModel.q_sample(target_im_z, t-step_target_inter, _noise)
             # Get condintioning
             img_cond = LDModel.get_learned_conditioning(input_im).tile(n_samples, 1, 1)
             T = torch.cat([elevation, torch.sin(azimuth), torch.cos(azimuth), radius])
@@ -252,8 +256,8 @@ def main_run(conf,
             step = int(1000//75) * max(index, 0) + 1
             with torch.no_grad():
                 pred_target, target_latent, pred_x0, input_latent, target_im_z = sample_model(input_im, target_im, LDModel, precision, 
-                                                            h, w, n_samples, scale, ddim_eta,
-                                                            start_elevation, start_azimuth[iter].unsqueeze(0), start_radius, index, step)
+                                                     h, w, start_elevation, start_azimuth[iter].unsqueeze(0), start_radius, n_samples= n_samples, scale= scale,
+                                                     ddim_steps= ddim_steps, ddim_eta= ddim_eta, index= index)
                 decode_pred_target   = LDModel.decode_first_stage(pred_target)
                 decode_input_latent  = LDModel.decode_first_stage(input_latent)
                 decode_target_latent = LDModel.decode_first_stage(target_latent)

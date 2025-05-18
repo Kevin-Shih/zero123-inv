@@ -9,19 +9,19 @@ model:
     use: False
     milestones: [200]
     gamma: 0.2
-  guide_scale: 10.0
-  ddim_eta: 0.1
+  guide_scale: 3.0
+  ddim_eta: 0.0
 input:
   ref_image: "elev=0_azi=0.png"
-  target_image: "elev=0_azi=30.png"
+  target_image: "elev=0_azi=15.png"
   rel_elev: 0.0
   rel_azi: 0.0
   rel_radius: 0.0
-  max_index: 1
+  max_index: 2
   min_index: null
 log:
   log_root: "../runs/loss_check_all"
-  run_name: "sampler_guide10_step5_index1_eta0.1"
+  run_name: "perfectInput_index2"
   # log_all_img: True
   # log_all_img_freq: 10
 comment: ""

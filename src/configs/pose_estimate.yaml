@@ -9,8 +9,8 @@ model:
     use: False
     milestones: [200]
     gamma: 0.2
-  guide_scale: 10.0
-  ddim_eta: 0.1
+  guide_scale: 3.0
+  ddim_eta: 0.15
 input:
   ref_image: "elev=0_azi=0.png"
   target_image: "elev=0_azi=5.png"
@@ -20,8 +20,8 @@ input:
   max_index: 1
   min_index: null
 log:
-  log_root: "../runs/fixInput/LatentLoss"
-  run_name: "sampler_guide10_index1_eta0.1"
+  log_root: "../runs/perfectInput/LatentLoss"
+  run_name: "guide10_index1"
   log_all_img: True
   log_all_img_freq: 10
 comment: ""

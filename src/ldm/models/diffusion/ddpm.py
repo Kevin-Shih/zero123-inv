@@ -921,7 +921,7 @@ class LatentDiffusion(DDPM):
             # Reshape to img shape
             z = z.view((z.shape[0], -1, ks[0], ks[1], z.shape[-1]))  # (bn, nc, ks[0], ks[1], L )
             z_list = [z[:, :, :, :, i] for i in range(z.shape[-1])]
-
+            print(f"self.cond_stage_key= {self.cond_stage_key}, self.model.conditioning_key={self.model.conditioning_key}")
             if self.cond_stage_key in ["image", "LR_image", "segmentation", 'bbox_img'] and self.model.conditioning_key:  # todo check for completeness
                 c_key = next(iter(cond.keys()))  # get key
                 c = next(iter(cond.values()))  # get value
