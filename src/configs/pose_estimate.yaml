@@ -4,24 +4,30 @@ model:
   model_config: "configs/sd-objaverse-finetune-c_concat-256.yaml"
   ckpt: "../105000.ckpt"
   n_samples: 1
-  lr: 3e-4
+  # 0:Latent, 1:LatentX0, 2:Img, 3:ImgX0, 
+  # 4:MaskImg, 5:MaskImgX0
+  loss_type: "BluredMaskImgX0" # for logging
+  loss_amp: 1e5
+  lr: 1e-2
   lr_scheduler:
     use: False
     milestones: [200]
     gamma: 0.2
   guide_scale: 3.0
-  ddim_eta: 0.15
+  ddim_eta: 1.0
+  iters: 1000
 input:
   ref_image: "elev=0_azi=0.png"
-  target_image: "elev=0_azi=5.png"
+  target_image: "elev=0_azi=20.png"
   rel_elev: 0.0
   rel_azi: 0.0
   rel_radius: 0.0
-  max_index: 1
+  max_index: 3
   min_index: null
-log:
-  log_root: "../runs/perfectInput/LatentLoss"
-  run_name: "guide10_index1"
-  log_all_img: True
-  log_all_img_freq: 10
+  # 0:fix, 1:perfect, 2:prograssive
+  input_type: "perfect" # for logging
+log_root: "../runs/perfectInput/BluredMaskImgX0Loss"
+run_name: "eta1_index3"
+log_all_img: True
+log_all_img_freq: 10
 comment: ""

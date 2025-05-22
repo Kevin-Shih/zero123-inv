@@ -62,8 +62,9 @@ def preprocess_image(models, input_im, preprocess, h=256, w=256, device='cuda'):
     start_time = time.time()
 
     if preprocess:
-        input_im = load_and_preprocess(models['carvekit'], input_im)
+        input_im, forground_mask = load_and_preprocess(models['carvekit'], input_im)
         input_im = (input_im / 255.0).astype(np.float32)
+        forground_mask = forground_mask.astype(np.float32)
         # (H, W, 3) array in [0, 1].
     else:
         input_im = input_im.resize([256, 256], Image.Resampling.LANCZOS)
@@ -75,6 +76,8 @@ def preprocess_image(models, input_im, preprocess, h=256, w=256, device='cuda'):
 
         # new method: apply correct method of compositing to avoid sudden transitions / thresholding
         # (smoothly transition foreground to white background based on alpha values)
+        forground_mask = np.zeros([256, 256], dtype=np.float32) 
+        forground_mask[input_im[:, :, -1] > 0.9] = [1.]
         alpha = input_im[:, :, 3:4]
         white_im = np.ones_like(input_im)
         input_im = alpha * input_im + (1.0 - alpha) * white_im
@@ -91,7 +94,7 @@ def preprocess_image(models, input_im, preprocess, h=256, w=256, device='cuda'):
     input_im = transforms.ToTensor()(input_im).unsqueeze(0).to(device)
     input_im = input_im * 2 - 1 # ??
     input_im = transforms.Resize([h, w])(input_im)
-    return input_im
+    return input_im, forground_mask
 
 def calculate_param(LDModel, step, n_samples, device):
     alphas = LDModel.alphas_cumprod
@@ -130,7 +133,7 @@ def sample_model(input_im, target_im, LDModel, precision, h, w,
     step_target_inter = int(1000//ddim_steps) if index > 0 else 1
     precision_scope = autocast if precision == 'autocast' else nullcontext
     with precision_scope('cuda'):
-        with LDModel.ema_scope():
+        # with LDModel.ema_scope():
             # region prepare input
             # Set time step and noisy latent shape
             t = torch.full((n_samples,), step, device=input_im.device, dtype=torch.long) # type: ignore
@@ -143,10 +146,14 @@ def sample_model(input_im, target_im, LDModel, precision, h, w,
             # Add noise to the input latent and target latent
             # _noise = torch.randn_like(input_im_z)
             _noise = torch.randn(size, device=input_im_z.device)
-            _perfect_input = target_im_z.clone().detach()
-            input_latent = LDModel.q_sample(_perfect_input, t, _noise)
+            # _perfect_input = target_im_z.clone().detach()
+            input_latent = LDModel.q_sample(target_im_z.clone().detach(), t, _noise)
             # input_latent = LDModel.q_sample(input_im_z, t, _noise)
+            _target_start_latent = LDModel.q_sample(target_im_z.clone().detach(), t, _noise)
             target_latent = LDModel.q_sample(target_im_z, t-step_target_inter, _noise)
+
+            latent_diff = _target_start_latent - target_latent
+            latent_x0_diff = _target_start_latent - target_im_z
             # Get condintioning
             img_cond = LDModel.get_learned_conditioning(input_im).tile(n_samples, 1, 1)
             T = torch.cat([elevation, torch.sin(azimuth), torch.cos(azimuth), radius])
@@ -192,9 +199,9 @@ def sample_model(input_im, target_im, LDModel, precision, h, w,
             pred_x0 = (input_latent - sqrt_one_minus_at * e_t) / a_t.sqrt()
             # direction pointing to x_t
             dir_xt = (1. - a_prev - sigma_t**2).sqrt() * e_t
-            x_prev = a_prev.sqrt() * pred_x0 + dir_xt + sigma_t * _noise
+            x_indexminus1 = a_prev.sqrt() * pred_x0 + dir_xt + sigma_t * _noise
 
-            return x_prev, target_latent, pred_x0, input_latent, target_im_z
+            return x_indexminus1, pred_x0, input_latent, target_latent, target_im_z, latent_diff, latent_x0_diff
 
 
 def main_run(conf,
@@ -210,11 +217,12 @@ def main_run(conf,
     '''
     :param raw_im (PIL Image).
     '''
-    raw_im.thumbnail([1536, 1536], Image.Resampling.LANCZOS)
-    target_im.thumbnail([1536, 1536], Image.Resampling.LANCZOS)
+    raw_im.thumbnail([256, 256], Image.Resampling.LANCZOS)
+    target_im.thumbnail([256, 256], Image.Resampling.LANCZOS)
 
-    input_im = preprocess_image(models, raw_im, preprocess, h=h, w=w, device=device)
-    target_im = preprocess_image(models, target_im, preprocess, h=h, w=w, device=device)
+    input_im, input_mask = preprocess_image(models, raw_im, preprocess, h=h, w=w, device=device)
+    target_im, target_mask = preprocess_image(models, target_im, preprocess, h=h, w=w, device=device)
+    target_mask = Tensor(target_mask).to(device)
     LDModel = models['turncam']
     LDModel.register_buffer('ddim_sigmas_for_original_steps', 
                             ddim_eta * torch.sqrt((1 - LDModel.alphas_cumprod_prev) / (1 - LDModel.alphas_cumprod) *
@@ -255,27 +263,40 @@ def main_run(conf,
 
             step = int(1000//75) * max(index, 0) + 1
             with torch.no_grad():
-                pred_target, target_latent, pred_x0, input_latent, target_im_z = sample_model(input_im, target_im, LDModel, precision, 
-                                                     h, w, start_elevation, start_azimuth[iter].unsqueeze(0), start_radius, n_samples= n_samples, scale= scale,
-                                                     ddim_steps= ddim_steps, ddim_eta= ddim_eta, index= index)
+                pred_target, pred_x0, input_latent, target_latent, target_im_z,\
+                latent_diff, latent_x0_diff = sample_model(input_im, target_im, LDModel, precision, 
+                                                           h, w, start_elevation, start_azimuth[iter].unsqueeze(0), start_radius, n_samples= n_samples, scale= scale,
+                                                           ddim_steps= ddim_steps, ddim_eta= ddim_eta, index= index)
                 decode_pred_target   = LDModel.decode_first_stage(pred_target)
                 decode_input_latent  = LDModel.decode_first_stage(input_latent)
                 decode_target_latent = LDModel.decode_first_stage(target_latent)
 
                 decode_target_x0     = LDModel.decode_first_stage(target_im_z)
                 decode_pred_x0       = LDModel.decode_first_stage(pred_x0)
-
+                
                 decode_pred_target   = torch.clamp((decode_pred_target   + 1.0) / 2.0, min=0.0, max=1.0)
                 decode_input_latent  = torch.clamp((decode_input_latent  + 1.0) / 2.0, min=0.0, max=1.0)
                 decode_target_latent = torch.clamp((decode_target_latent + 1.0) / 2.0, min=0.0, max=1.0)
                 decode_target_x0     = torch.clamp((decode_target_x0     + 1.0) / 2.0, min=0.0, max=1.0)
                 decode_pred_x0       = torch.clamp((decode_pred_x0       + 1.0) / 2.0, min=0.0, max=1.0)
 
+                pred_latent_diff =    input_latent - pred_target 
+                pred_latent_x0_diff = input_latent - pred_x0 
+                # latent_diff =         input_latent - target_latent 
+                # latent_x0_diff =      input_latent - target_im_z 
+                noise_loss    = nn.functional.mse_loss(pred_latent_diff, latent_diff) # loss between latent_diff and denoised diff
+                noise_x0_loss    = nn.functional.mse_loss(pred_latent_x0_diff, latent_x0_diff) # loss between latent_x0_diff and denoised x0 diff
                 latent_loss    = nn.functional.mse_loss(pred_target, target_latent)
                 latent_x0_loss = nn.functional.mse_loss(pred_x0, target_im_z.expand_as(pred_x0))
                 # neg_latent_x0_loss = -1 * nn.functional.mse_loss(pred_x0, target_im_z.expand_as(pred_x0))
                 img_loss       = nn.functional.mse_loss(decode_pred_target, decode_target_latent)
                 img_x0_loss    = nn.functional.mse_loss(decode_pred_x0, target_im.expand_as(decode_pred_x0))
+                no_reduct_mse = nn.MSELoss(reduction='none')
+                _mask_img_loss = (no_reduct_mse(decode_pred_target, decode_target_latent) * target_mask).sum()
+                non_zero_elements = target_mask.sum()
+                mask_img_loss = _mask_img_loss / non_zero_elements
+                _mask_img_x0_loss = (no_reduct_mse(decode_pred_x0, target_im.expand_as(decode_pred_x0)) * target_mask).sum()
+                mask_img_x0_loss = _mask_img_x0_loss / non_zero_elements
                 decode_loss    = nn.functional.mse_loss(decode_target_x0, target_im.expand_as(decode_target_x0))
                 
                 latent_loss_index.append(latent_loss.item())
@@ -293,19 +314,23 @@ def main_run(conf,
 
                 err = [temp_elev - np.rad2deg(gt_elevation), temp_azi - np.rad2deg(gt_azimuth), temp_radius - gt_radius]
                 pbar.set_postfix_str(f'step: {index}-{step}, loss: {total_loss.item():.3f}, Err elev, azi= {err[0]:.2f}, {err[1]:.2f}, Curr= {temp_elev:.2f}, {temp_azi:.2f}')
-                tb_writer.add_scalar('Loss/total',      total_loss.item(),     iter)
-                tb_writer.add_scalar('Loss/img',        img_loss.item(),       iter)
-                tb_writer.add_scalar('Loss/latent',     latent_loss.item(),    iter)
-                tb_writer.add_scalar('Loss/latent_x0',  latent_x0_loss.item(), iter)
-                tb_writer.add_scalar('Loss/img_x0',     img_x0_loss.item(),    iter)
-                tb_writer.add_scalar('Loss/decode',     decode_loss.item(),    iter)
-                tb_writer.add_scalar('Error/elevation', err[0],         iter)
-                tb_writer.add_scalar('Error/azimuth',   err[1],         iter)
-                tb_writer.add_scalar('Error/Abs elev',  np.abs(err[0]), iter)
-                tb_writer.add_scalar('Error/Abs azi',   np.abs(err[1]), iter)
-                tb_writer.add_scalar('Estimate/elev',   temp_elev,      iter)
-                tb_writer.add_scalar('Estimate/azi',    temp_azi,       iter)
-                tb_writer.add_scalar('Log/ddim_index',  index,          iter)
+                tb_writer.add_scalar('Loss/a_total_loss',  total_loss.item(),       iter)
+                tb_writer.add_scalar('Loss/noise_loss',    noise_loss.item(),       iter)
+                tb_writer.add_scalar('Loss/noise_x0_loss', noise_x0_loss.item(),    iter)
+                tb_writer.add_scalar('Loss/latent',        latent_loss.item(),      iter)
+                tb_writer.add_scalar('Loss/latent_x0',     latent_x0_loss.item(),   iter)
+                tb_writer.add_scalar('Loss/img',           img_loss.item(),         iter)
+                tb_writer.add_scalar('Loss/img_x0',        img_x0_loss.item(),      iter)
+                tb_writer.add_scalar('Loss/mask_img',      mask_img_loss.item(),    iter)
+                tb_writer.add_scalar('Loss/mask_img_x0',   mask_img_x0_loss.item(), iter)
+                tb_writer.add_scalar('Loss/decode',        decode_loss.item(),      iter)
+                tb_writer.add_scalar('Error/elevation',    err[0],         iter)
+                tb_writer.add_scalar('Error/azimuth',      err[1],         iter)
+                tb_writer.add_scalar('Error/Abs elev',     np.abs(err[0]), iter)
+                tb_writer.add_scalar('Error/Abs azi',      np.abs(err[1]), iter)
+                tb_writer.add_scalar('Estimate/elev',      temp_elev,      iter)
+                tb_writer.add_scalar('Estimate/azi',       temp_azi,       iter)
+                tb_writer.add_scalar('Log/ddim_index',     index,          iter)
                 tb_writer.add_image('Image/generated_input_latent',  decode_input_latent[0],  iter)
                 tb_writer.add_image('Image/generated_target_latent', decode_target_latent[0], iter)
                 tb_writer.add_image('Image/generated_target_x0',     decode_target_x0[0],     iter)
@@ -486,6 +511,7 @@ if __name__ == '__main__':
              gt_elevation = np.deg2rad(gt_elev),
              gt_azimuth = np.deg2rad(gt_azi),
              gt_radius = 0.0,
+             preprocess=True,
              start_elevation = np.deg2rad(rel_elev_deg),
              start_azimuth = np.deg2rad(rel_azi_deg),
              start_radius = conf.input.rel_radius,
