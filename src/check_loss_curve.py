@@ -1,30 +1,24 @@
-from ast import Dict
-from math import e
 import os
-# import math
-# from cv2 import mean
-from einops import rearrange
-import fire
 import argparse
+from unittest import loader
+from click import group
 import numpy as np
 import time
 import re
+import wandb
+import yaml
 
 import torch
 from contextlib import nullcontext
-# from diffusers.pipelines.stable_diffusion import StableDiffusionSafetyChecker
-# from einops import rearrange
 from ldm.models.diffusion.ddim import DDIMSampler
 from ldm.models.diffusion.ddpm import LatentDiffusion
 from ldm.util import create_carvekit_interface, load_and_preprocess, instantiate_from_config
 from lovely_numpy import lo
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import OmegaConf
 from PIL import Image
 from rich import print
-from torch import Tensor, optim, nn, randint
-from torch.nn.parameter import Parameter
+from torch import Tensor, index_copy, optim, nn
 from torch.amp.autocast_mode import autocast
-from torch.utils.tensorboard import writer
 from torchvision import transforms
 from transformers import AutoFeatureExtractor
 
@@ -64,7 +58,7 @@ def preprocess_image(models, input_im, preprocess, h=256, w=256, device='cuda'):
     if preprocess:
         input_im, forground_mask = load_and_preprocess(models['carvekit'], input_im)
         input_im = (input_im / 255.0).astype(np.float32)
-        forground_mask = forground_mask.astype(np.float32)
+        # forground_mask = forground_mask.astype(np.float32)
         # (H, W, 3) array in [0, 1].
     else:
         input_im = input_im.resize([256, 256], Image.Resampling.LANCZOS)
@@ -205,7 +199,7 @@ def sample_model(input_im, target_im, LDModel, precision, h, w,
 
 
 def main_run(conf,
-             raw_im, target_im,
+             input_im, target_im,
              models, device,
              gt_elevation=0.0, gt_azimuth=0.0, gt_radius=0.0,
              start_elevation=0.0, start_azimuth=0.0, start_radius=0.0,
@@ -213,16 +207,26 @@ def main_run(conf,
              scale=3.0, n_samples=4, ddim_steps=75, ddim_eta=1.0,
              learning_rate = 1e-3,
              precision='fp32', h=256, w=256,
-             tb_writer:writer.SummaryWriter=writer.SummaryWriter(),):
+             ):
     '''
     :param raw_im (PIL Image).
     '''
-    raw_im.thumbnail([256, 256], Image.Resampling.LANCZOS)
+    input_im.thumbnail([256, 256], Image.Resampling.LANCZOS)
     target_im.thumbnail([256, 256], Image.Resampling.LANCZOS)
 
-    input_im, input_mask = preprocess_image(models, raw_im, preprocess, h=h, w=w, device=device)
+    input_im, _ = preprocess_image(models, input_im, preprocess, h=h, w=w, device=device)
     target_im, target_mask = preprocess_image(models, target_im, preprocess, h=h, w=w, device=device)
+    _target_im_copy = target_im.clone().detach()
     target_mask = Tensor(target_mask).to(device)
+    target_mask = target_mask.unsqueeze(0) #(1, H, W)
+    # print(target_mask.shape)
+    target_mask = transforms.Resize(int(256*1.25), interpolation=transforms.InterpolationMode.BILINEAR)(target_mask)
+    # print(target_mask.shape)
+    target_mask = transforms.CenterCrop((256, 256))(target_mask)[0]
+    # print(target_mask.shape)
+    clamp_input_im = torch.clamp((input_im + 1.0) / 2.0, min=0.0, max=1.0)
+    clamp_target_im = torch.clamp((target_im + 1.0) / 2.0, min=0.0, max=1.0)
+    
     LDModel = models['turncam']
     LDModel.register_buffer('ddim_sigmas_for_original_steps', 
                             ddim_eta * torch.sqrt((1 - LDModel.alphas_cumprod_prev) / (1 - LDModel.alphas_cumprod) *
@@ -244,24 +248,55 @@ def main_run(conf,
     azi_list = np.array([x for x in range(lower_bound, upper_bound, conf.check_step)]) / 10.0  + np.round(np.rad2deg(gt_azimuth),0) # all
     # azi_list = np.array([x for x in range(-1200, 1201, 5)]) / 10.0  + np.round(np.rad2deg(gt_azimuth),0) # wider
     # azi_list = np.array([x for x in range(-900, 901, 1)]) / 10.0  + np.round(np.rad2deg(gt_azimuth),0)   # wide
-    # azi_list = np.array([x for x in range(-300, 301, 1)]) / 10.0  + np.round(np.rad2deg(gt_azimuth),0)   # normal
-    # azi_list = np.array([x for x in range(-150, 151, 1)]) / 10.0  + np.round(np.rad2deg(gt_azimuth),0)   # narrow
+    # azi_list = np.array([x for x in range(-450, 451, 1)]) / 10.0  + np.round(np.rad2deg(gt_azimuth),0)   # normal
     start_azimuth = Tensor(np.deg2rad(azi_list)).to(torch.float32).to(device)
     max_iter = len(azi_list)
     max_index = conf.input.max_index
     min_index = max_index if conf.input.min_index is None else max(conf.input.min_index, 0)
-    for index in range(min_index, max_index+1):
-        pbar = tqdm(range(max_iter), desc='DDIM', total=max_iter, ncols=140)
-        
+    curr_time = time.localtime(time.time())
+    group_mon = curr_time.tm_mon
+    group_mday = curr_time.tm_mday
+    group_hours = curr_time.tm_hour
+    group_mins = curr_time.tm_min // 5 * 5
+    for i, index in enumerate(range(min_index, max_index + 1, 2), 0):
         decode_loss_index = []
         latent_loss_index = []
         latent_x0_loss_index = []
         img_loss_index = []
         img_loss_x0_index = []
-        for i, iter in enumerate(pbar, start=1):
-            pbar.set_description_str(f'[{i}/{max_iter}]')
+        # region summary setup
+        # maybe use yaml to dict. directly put config file into w&b config.
+        curr_time = time.localtime(time.time())
+        mon = curr_time.tm_mon
+        mday = curr_time.tm_mday
+        hours = curr_time.tm_hour
+        mins = curr_time.tm_min + curr_time.tm_sec / 60
+        # writer_name = f'{mon:02d}-{mday:02d}/{hours}-{mins:.1f}_{conf.run_name}_gt-{gt_elev_deg:.0f}-{gt_azi_deg:.0f}'+\
+        #               f'_st-{rel_elev_deg:.0f}-{rel_azi_deg:.0f}'
+        
+        wb_run = wandb.init(
+            entity="kevin-shih",
+            project="Zero123-Adv-Loss-Check",
+            group= f'{conf.group_name}_{group_mon:02d}-{group_mday:02d}_{group_hours:02d}_{group_mins:02d}' if max_index > min_index else conf.group_name,
+            name= f'{conf.run_name}_gt-{gt_elev_deg:.0f}-{gt_azi_deg:.0f}_idx{index}',
+            settings=wandb.Settings(x_disable_stats=True),
+            config={
+                "start_date": f'{mon:02d}-{mday:02d}',
+                "start_time": f'{hours:02d}-{mins:4.1f}',
+                "gt_elev_deg": f'{gt_elev_deg:.1f}',
+                "gt_azi_deg": f'{gt_azi_deg:.1f}',
+                **yaml.load(open(args.config, 'r'), Loader=yaml.SafeLoader),
+            },
+        )
+        # endregion
+        wb_run.log({'Image/input_im':  wandb.Image(clamp_input_im[0],  caption=f"input_im"),
+                    'Image/target_im': wandb.Image(clamp_target_im[0], caption=f"target_im"),
+        }, step=0)
 
-            step = int(1000//75) * max(index, 0) + 1
+        pbar = tqdm(range(max_iter), desc='DDIM', total=max_iter, ncols=140)
+        for j, iter in enumerate(pbar, start=1):
+            pbar.set_description_str(f'[{j}/{max_iter}]')
+            step = int(1000//ddim_steps) * max(index, 0) + 1
             with torch.no_grad():
                 pred_target, pred_x0, input_latent, target_latent, target_im_z,\
                 latent_diff, latent_x0_diff = sample_model(input_im, target_im, LDModel, precision, 
@@ -274,30 +309,75 @@ def main_run(conf,
                 decode_target_x0     = LDModel.decode_first_stage(target_im_z)
                 decode_pred_x0       = LDModel.decode_first_stage(pred_x0)
                 
-                decode_pred_target   = torch.clamp((decode_pred_target   + 1.0) / 2.0, min=0.0, max=1.0)
-                decode_input_latent  = torch.clamp((decode_input_latent  + 1.0) / 2.0, min=0.0, max=1.0)
-                decode_target_latent = torch.clamp((decode_target_latent + 1.0) / 2.0, min=0.0, max=1.0)
-                decode_target_x0     = torch.clamp((decode_target_x0     + 1.0) / 2.0, min=0.0, max=1.0)
-                decode_pred_x0       = torch.clamp((decode_pred_x0       + 1.0) / 2.0, min=0.0, max=1.0)
+                if conf.model.clamp is not None:
+                    print(f'clamping output: {conf.model.clamp}')
+                    if conf.model.clamp == 'normal':
+                        decode_pred_target   = torch.clamp((decode_pred_target   + 1.0) / 2.0, min=0.0, max=1.0)
+                        decode_input_latent  = torch.clamp((decode_input_latent  + 1.0) / 2.0, min=0.0, max=1.0)
+                        decode_target_latent = torch.clamp((decode_target_latent + 1.0) / 2.0, min=0.0, max=1.0)
+                        decode_target_x0     = torch.clamp((decode_target_x0     + 1.0) / 2.0, min=0.0, max=1.0)
+                        decode_pred_x0       = torch.clamp((decode_pred_x0       + 1.0) / 2.0, min=0.0, max=1.0)
+                        _target_im_copy      = torch.clamp((_target_im_copy      + 1.0) / 2.0, min=0.0, max=1.0)
+                    elif conf.model.clamp == 'ddim':
+                        decode_pred_target   = torch.clamp(decode_pred_target  , min=-1.0, max=1.0)
+                        decode_input_latent  = torch.clamp(decode_input_latent , min=-1.0, max=1.0)
+                        decode_target_latent = torch.clamp(decode_target_latent, min=-1.0, max=1.0)
+                        decode_target_x0     = torch.clamp(decode_target_x0    , min=-1.0, max=1.0)
+                        decode_pred_x0       = torch.clamp(decode_pred_x0      , min=-1.0, max=1.0)
+                        _target_im_copy      = torch.clamp(_target_im_copy     , min=-1.0, max=1.0)
+                
+                blur = transforms.GaussianBlur(kernel_size=[conf.model.blur_k_ize], sigma = (conf.model.blur_min, conf.model.blur_max))
+                blur_decode_pred_target     = blur(decode_pred_target)
+                blur_decode_pred_x0         = blur(decode_pred_x0)
+                blur_decode_target_latent   = blur(decode_target_latent)
+                blur_target_im              = blur(_target_im_copy)
+                blur_decode_target_x0       = blur(decode_target_x0)
 
-                pred_latent_diff =    input_latent - pred_target 
-                pred_latent_x0_diff = input_latent - pred_x0 
-                # latent_diff =         input_latent - target_latent 
-                # latent_x0_diff =      input_latent - target_im_z 
-                noise_loss    = nn.functional.mse_loss(pred_latent_diff, latent_diff) # loss between latent_diff and denoised diff
-                noise_x0_loss    = nn.functional.mse_loss(pred_latent_x0_diff, latent_x0_diff) # loss between latent_x0_diff and denoised x0 diff
-                latent_loss    = nn.functional.mse_loss(pred_target, target_latent)
-                latent_x0_loss = nn.functional.mse_loss(pred_x0, target_im_z.expand_as(pred_x0))
-                # neg_latent_x0_loss = -1 * nn.functional.mse_loss(pred_x0, target_im_z.expand_as(pred_x0))
-                img_loss       = nn.functional.mse_loss(decode_pred_target, decode_target_latent)
-                img_x0_loss    = nn.functional.mse_loss(decode_pred_x0, target_im.expand_as(decode_pred_x0))
-                no_reduct_mse = nn.MSELoss(reduction='none')
-                _mask_img_loss = (no_reduct_mse(decode_pred_target, decode_target_latent) * target_mask).sum()
-                non_zero_elements = target_mask.sum()
-                mask_img_loss = _mask_img_loss / non_zero_elements
-                _mask_img_x0_loss = (no_reduct_mse(decode_pred_x0, target_im.expand_as(decode_pred_x0)) * target_mask).sum()
-                mask_img_x0_loss = _mask_img_x0_loss / non_zero_elements
-                decode_loss    = nn.functional.mse_loss(decode_target_x0, target_im.expand_as(decode_target_x0))
+                mask_blur_decode_pred_target     = blur_decode_pred_target   * target_mask.float()
+                mask_blur_decode_pred_x0         = blur_decode_pred_x0       * target_mask.float()
+                mask_blur_decode_target_latent   = blur_decode_target_latent * target_mask.float()
+                mask_blur_target_im              = torch.clamp((blur_target_im + 1.0) / 2.0, min=0.0, max=1.0) * target_mask.float()
+                
+                pred_latent_diff    =    input_latent - pred_target
+                pred_latent_x0_diff = input_latent - pred_x0
+
+                decode_loss       = nn.functional.mse_loss(decode_target_x0, _target_im_copy.expand_as(decode_target_x0))
+                blur_decode_loss  = nn.functional.mse_loss(blur_decode_target_x0, blur_target_im.expand_as(decode_target_x0))
+                input_latent_loss = nn.functional.mse_loss(input_latent, target_latent)
+                noise_loss        = nn.functional.mse_loss(pred_latent_diff, latent_diff) # loss between latent_diff and denoised diff
+                noise_x0_loss     = nn.functional.mse_loss(pred_latent_x0_diff, latent_x0_diff) # loss between latent_x0_diff and denoised x0 diff
+                latent_loss       = nn.functional.mse_loss(pred_target, target_latent)
+                latent_x0_loss    = nn.functional.mse_loss(pred_x0, target_im_z.expand_as(pred_x0))
+                img_loss          = nn.functional.mse_loss(decode_pred_target, decode_target_latent)
+                img_x0_loss       = nn.functional.mse_loss(decode_pred_x0, _target_im_copy.expand_as(decode_pred_x0))
+                blur_img_loss     = nn.functional.mse_loss(blur_decode_pred_target, blur_decode_target_latent)
+                blur_img_x0_loss  = nn.functional.mse_loss(blur_decode_pred_x0, blur_target_im.expand_as(blur_decode_pred_x0))
+                # img_loss          = nn.functional.mse_loss(decode_pred_target, decode_target_latent) - decode_loss
+                # img_x0_loss       = nn.functional.mse_loss(decode_pred_x0, _target_im_copy.expand_as(decode_pred_x0)) - decode_loss
+                # blur_img_loss     = nn.functional.mse_loss(blur_decode_pred_target, blur_decode_target_latent) - blur_decode_loss
+                # blur_img_x0_loss  = nn.functional.mse_loss(blur_decode_pred_x0, blur_target_im.expand_as(blur_decode_pred_x0)) - blur_decode_loss
+                
+                no_reduct_mse       = nn.MSELoss(reduction='none')
+                non_zero_elements   = target_mask.sum()
+                _mask_img_loss      = (no_reduct_mse(decode_pred_target, decode_target_latent) * target_mask.float()).sum()
+                mask_img_loss       = _mask_img_loss / non_zero_elements
+                _mask_img_x0_loss   = (no_reduct_mse(decode_pred_x0, _target_im_copy.expand_as(decode_pred_x0)) * target_mask.float()).sum()
+                mask_img_x0_loss    = _mask_img_x0_loss / non_zero_elements
+                
+                _blur_mask_img_loss     = (no_reduct_mse(blur_decode_pred_target, blur_decode_target_latent) * target_mask.float()).sum()
+                blur_mask_img_loss      = _blur_mask_img_loss / non_zero_elements
+                _blur_mask_img_x0_loss  = (no_reduct_mse(blur_decode_pred_x0, blur_target_im.expand_as(blur_decode_pred_x0)) * target_mask.float()).sum()
+                blur_mask_img_x0_loss   = _blur_mask_img_x0_loss / non_zero_elements
+
+                # _mask_img_loss      = (no_reduct_mse(decode_pred_target, decode_target_latent) * target_mask.float()).sum()
+                # mask_img_loss       = _mask_img_loss / non_zero_elements - decode_loss
+                # _mask_img_x0_loss   = (no_reduct_mse(decode_pred_x0, _target_im_copy.expand_as(decode_pred_x0)) * target_mask.float()).sum()
+                # mask_img_x0_loss    = _mask_img_x0_loss / non_zero_elements - decode_loss
+                
+                # _blur_mask_img_loss     = (no_reduct_mse(blur_decode_pred_target, blur_decode_target_latent) * target_mask.float()).sum()
+                # blur_mask_img_loss      = _blur_mask_img_loss / non_zero_elements - blur_decode_loss
+                # _blur_mask_img_x0_loss  = (no_reduct_mse(blur_decode_pred_x0, blur_target_im.expand_as(blur_decode_pred_x0)) * target_mask.float()).sum()
+                # blur_mask_img_x0_loss   = _blur_mask_img_x0_loss / non_zero_elements  - blur_decode_loss
                 
                 latent_loss_index.append(latent_loss.item())
                 latent_x0_loss_index.append(latent_x0_loss.item())
@@ -305,106 +385,124 @@ def main_run(conf,
                 img_loss_x0_index.append(img_x0_loss.item())
                 decode_loss_index.append(decode_loss.item())
 
-                total_loss = latent_loss + img_loss
-                # region logging
-            # if index == max_index:
+                total_loss = blur_mask_img_x0_loss.clone().detach()
+                if conf.model.loss_amp:
+                    total_loss = total_loss * conf.model.loss_amp
+            # region logging
                 temp_elev= np.rad2deg(start_elevation.item())
                 temp_azi= np.rad2deg(start_azimuth[iter].item())
                 temp_radius= start_radius.item()
 
                 err = [temp_elev - np.rad2deg(gt_elevation), temp_azi - np.rad2deg(gt_azimuth), temp_radius - gt_radius]
                 pbar.set_postfix_str(f'step: {index}-{step}, loss: {total_loss.item():.3f}, Err elev, azi= {err[0]:.2f}, {err[1]:.2f}, Curr= {temp_elev:.2f}, {temp_azi:.2f}')
-                tb_writer.add_scalar('Loss/a_total_loss',  total_loss.item(),       iter)
-                tb_writer.add_scalar('Loss/noise_loss',    noise_loss.item(),       iter)
-                tb_writer.add_scalar('Loss/noise_x0_loss', noise_x0_loss.item(),    iter)
-                tb_writer.add_scalar('Loss/latent',        latent_loss.item(),      iter)
-                tb_writer.add_scalar('Loss/latent_x0',     latent_x0_loss.item(),   iter)
-                tb_writer.add_scalar('Loss/img',           img_loss.item(),         iter)
-                tb_writer.add_scalar('Loss/img_x0',        img_x0_loss.item(),      iter)
-                tb_writer.add_scalar('Loss/mask_img',      mask_img_loss.item(),    iter)
-                tb_writer.add_scalar('Loss/mask_img_x0',   mask_img_x0_loss.item(), iter)
-                tb_writer.add_scalar('Loss/decode',        decode_loss.item(),      iter)
-                tb_writer.add_scalar('Error/elevation',    err[0],         iter)
-                tb_writer.add_scalar('Error/azimuth',      err[1],         iter)
-                tb_writer.add_scalar('Error/Abs elev',     np.abs(err[0]), iter)
-                tb_writer.add_scalar('Error/Abs azi',      np.abs(err[1]), iter)
-                tb_writer.add_scalar('Estimate/elev',      temp_elev,      iter)
-                tb_writer.add_scalar('Estimate/azi',       temp_azi,       iter)
-                tb_writer.add_scalar('Log/ddim_index',     index,          iter)
-                tb_writer.add_image('Image/generated_input_latent',  decode_input_latent[0],  iter)
-                tb_writer.add_image('Image/generated_target_latent', decode_target_latent[0], iter)
-                tb_writer.add_image('Image/generated_target_x0',     decode_target_x0[0],     iter)
-                tb_writer.add_image('Image/generated_pred_target',   decode_pred_target[0],   iter)
-                tb_writer.add_image('Image/generated_pred_x0',       decode_pred_x0[0],       iter)
-                # endregion
+                wb_run.log({
+                    'Log/ddim_index': index,
+                    "Estimate/elevation":           temp_elev,
+                    "Estimate/azimuth":             temp_azi,
+                    'Error/elevation':              err[0],
+                    'Error/azimuth':                err[1],
+                    'Error/Abs elevation':          np.abs(err[0]),
+                    'Error/Abs azimuth':            np.abs(err[1]),
+                    'Loss/img':                     img_loss.item(),
+                    'Loss/img_x0':                  img_x0_loss.item(),
+                    'Loss/mask_img':                mask_img_loss.item(),
+                    'Loss/mask_img_x0':             mask_img_x0_loss.item(),
+                    'Loss/blur_img':                blur_img_loss.item(),
+                    'Loss/blur_img_x0':             blur_img_x0_loss.item(),
+                    'Loss/blur_mask_img':           blur_mask_img_loss.item(),
+                    'Loss/blur_mask_img_x0':        blur_mask_img_x0_loss.item(),
+                    'Loss/noise_loss':              noise_loss.item(),
+                    'Loss/noise_x0_loss':           noise_x0_loss.item(),
+                    'Loss/latent':                  latent_loss.item(),
+                    'Loss/latent_x0':               latent_x0_loss.item(),
+                    'Loss/neg_latent_x0':           -1 * latent_x0_loss.item(),
+                    'Loss/input_latent':            input_latent_loss.item(),
+                    'Loss/decode':                  decode_loss.item(),
+                    'Loss/blur_decode':             blur_decode_loss.item(),
+                    'Image/input_latent':               wandb.Image(decode_input_latent[0]  , caption=f"generated_input_latent"),
+                    'Image/target_x0':                  wandb.Image(decode_target_x0[0]     , caption=f"generated_target_x0"),
+                    'Image/blured_target_im':           wandb.Image(blur_target_im[0]                   , caption=f"blured_target_im"),
+                    'Image/blured_mask_target_im':      wandb.Image(mask_blur_target_im[0]              , caption=f"blur_mask_target_im"),
+                    'Image/pred_target':                wandb.Image(decode_pred_target[0]               , caption=f"generated_pred_target"),
+                    'Image/target_latent':              wandb.Image(decode_target_latent[0]             , caption=f"generated_target_latent"),
+                    'Image/pred_x0':                    wandb.Image(decode_pred_x0[0]                   , caption=f"generated_pred_x0"),
+                    'Image/blured_pred_target':         wandb.Image(blur_decode_pred_target[0]          , caption=f"blured_pred_target"),
+                    'Image/blured_target_latent':       wandb.Image(blur_decode_target_latent[0]        , caption=f"blured_target_latent"),
+                    'Image/blured_pred_x0':             wandb.Image(blur_decode_pred_x0[0]              , caption=f"blured_pred_x0"),
+                    'Image/blured_mask_pred_target':    wandb.Image(mask_blur_decode_pred_target[0]     , caption=f"blur_mask_decode_pred_target"),
+                    'Image/blured_mask_target_latent':  wandb.Image(mask_blur_decode_target_latent[0]   , caption=f"blur_mask_decode_target_latent"),
+                    'Image/blured_mask_pred_x0':        wandb.Image(mask_blur_decode_pred_x0[0]         , caption=f"blur_mask_decode_pred_x0"),
+                }, step=iter)
+            # endregion
+        wb_run.finish()
         latent_loss_all.append(latent_loss_index)
         latent_x0_loss_all.append(latent_x0_loss_index)
         img_loss_all.append(img_loss_index)
         img_loss_x0_all.append(img_loss_x0_index)
         decode_loss_all.append(decode_loss_index)
     # region plotting
-    import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=(8,10))
-    # fig, ax = plt.subplots(figsize=(10,10))
-    x = np.array(azi_list) - int(np.rad2deg(gt_azimuth))
-    ax.plot(x[::1], latent_loss_all[0][::1], 'ro-', label='latent_loss')
-    ax.set_xlabel('Azimuth Error', fontsize=14)
-    ax.set_ylabel('Loss', fontsize=14)
-    ax.legend(
-        loc='best',
-        fontsize=14,
-        shadow=False,
-        facecolor='#bbb',
-        edgecolor='#000',
-        title=f'Loss Curve @ index{max_index}',
-        title_fontsize=14)
-    # fig.savefig('../runs/imgs/lossCurve_latent_loss.png')
-    tb_writer.add_figure('LossCurve/latent_pred_target', fig, 1)
-    ax.cla()
+    # import matplotlib.pyplot as plt
+    # fig, ax = plt.subplots(figsize=(8,10))
+    # # fig, ax = plt.subplots(figsize=(10,10))
+    # x = np.array(azi_list) - int(np.rad2deg(gt_azimuth))
+    # ax.plot(x[::1], latent_loss_all[0][::1], 'ro-', label='latent_loss')
+    # ax.set_xlabel('Azimuth Error', fontsize=14)
+    # ax.set_ylabel('Loss', fontsize=14)
+    # ax.legend(
+    #     loc='best',
+    #     fontsize=14,
+    #     shadow=False,
+    #     facecolor='#bbb',
+    #     edgecolor='#000',
+    #     title=f'Loss Curve @ index{max_index}',
+    #     title_fontsize=14)
+    # # fig.savefig('../runs/imgs/lossCurve_latent_loss.png')
+    # tb_writer.add_figure('LossCurve/latent_pred_target', fig, 1)
+    # ax.cla()
 
-    ax.plot(x[::1], latent_x0_loss_all[0][::1], 'mo-', label='latent_loss@t0')
-    ax.set_xlabel('Azimuth Error', fontsize=14)
-    ax.set_ylabel('Loss', fontsize=14)
-    ax.legend(
-        loc='best',
-        fontsize=14,
-        shadow=False,
-        facecolor='#bbb',
-        edgecolor='#000',
-        title=f'Loss Curve @ index{max_index}',
-        title_fontsize=14)
-    # fig.savefig('../runs/imgs/lossCurve_latent_t0_loss.png')
-    tb_writer.add_figure('LossCurve/latent_t0', fig, 1)
-    ax.cla()
+    # ax.plot(x[::1], latent_x0_loss_all[0][::1], 'mo-', label='latent_loss@t0')
+    # ax.set_xlabel('Azimuth Error', fontsize=14)
+    # ax.set_ylabel('Loss', fontsize=14)
+    # ax.legend(
+    #     loc='best',
+    #     fontsize=14,
+    #     shadow=False,
+    #     facecolor='#bbb',
+    #     edgecolor='#000',
+    #     title=f'Loss Curve @ index{max_index}',
+    #     title_fontsize=14)
+    # # fig.savefig('../runs/imgs/lossCurve_latent_t0_loss.png')
+    # tb_writer.add_figure('LossCurve/latent_t0', fig, 1)
+    # ax.cla()
 
-    ax.plot(x[::1], img_loss_all[0][::1], 'bo-', label='img_loss')
-    ax.set_xlabel('Azimuth Error', fontsize=14)
-    ax.set_ylabel('Loss', fontsize=14)
-    ax.legend(
-        loc='best',
-        fontsize=14,
-        shadow=False,
-        facecolor='#bbb',
-        edgecolor='#000',
-        title=f'Loss Curve @ index{max_index}',
-        title_fontsize=14)
-    # fig.savefig('../runs/imgs/lossCurve_img_loss.png')
-    tb_writer.add_figure('LossCurve/img_pred_target', fig, 1)
-    ax.cla()
+    # ax.plot(x[::1], img_loss_all[0][::1], 'bo-', label='img_loss')
+    # ax.set_xlabel('Azimuth Error', fontsize=14)
+    # ax.set_ylabel('Loss', fontsize=14)
+    # ax.legend(
+    #     loc='best',
+    #     fontsize=14,
+    #     shadow=False,
+    #     facecolor='#bbb',
+    #     edgecolor='#000',
+    #     title=f'Loss Curve @ index{max_index}',
+    #     title_fontsize=14)
+    # # fig.savefig('../runs/imgs/lossCurve_img_loss.png')
+    # # tb_writer.add_figure('LossCurve/img_pred_target', fig, 1)
+    # ax.cla()
 
-    ax.plot(x[::1], img_loss_x0_all[0][::1], 'co-', label='img_loss@t0')
-    ax.set_xlabel('Azimuth Error', fontsize=14)
-    ax.set_ylabel('Loss', fontsize=14)
-    ax.legend(
-        loc='best',
-        fontsize=14,
-        shadow=False,
-        facecolor='#bbb',
-        edgecolor='#000',
-        title=f'Loss Curve @ index{max_index}',
-        title_fontsize=14)
+    # ax.plot(x[::1], img_loss_x0_all[0][::1], 'co-', label='img_loss@t0')
+    # ax.set_xlabel('Azimuth Error', fontsize=14)
+    # ax.set_ylabel('Loss', fontsize=14)
+    # ax.legend(
+    #     loc='best',
+    #     fontsize=14,
+    #     shadow=False,
+    #     facecolor='#bbb',
+    #     edgecolor='#000',
+    #     title=f'Loss Curve @ index{max_index}',
+    #     title_fontsize=14)
     # fig.savefig('../runs/imgs/lossCurve_img_t0_loss.png')
-    tb_writer.add_figure('LossCurve/img_t0', fig, 1)
+    # tb_writer.add_figure('LossCurve/img_t0', fig, 1)
     # a1 = ax.imshow(np.asarray(latent_loss_all), cmap='Reds', interpolation='none', extent=[-15.0, 15.0, 0, max_index])
     # ax.set_aspect('auto')
     # colorbar = fig.colorbar(a1, ax=ax)
@@ -432,7 +530,7 @@ def main_run(conf,
     # fig.savefig('../runs/imgs/img_t0_loss.png')
     # tb_writer.add_figure('LossCurve/img_t0', fig, 0)
     # endregion
-    tb_writer.flush()
+    # tb_writer.flush()
     return 0
     
 
@@ -448,8 +546,6 @@ if __name__ == '__main__':
     args = parser.parse_args()
     print(f'Loading configs from {os.path.basename(args.config)}')
     conf = OmegaConf.load(args.config)
-    print()
-    print(OmegaConf.to_yaml(conf))
     
     ref_image_path = os.path.join(conf.dataroot, conf.input.ref_image)
     target_image_path = os.path.join(conf.dataroot, conf.input.target_image)
@@ -476,46 +572,30 @@ if __name__ == '__main__':
     # region Load images and set gt
     ref_image = Image.open(ref_image_path)
     target_image = Image.open(target_image_path)
-    gt_elev = 0
-    gt_azi = 0
+    gt_elev_deg = 0
+    gt_azi_deg = 0
     match1 = re.search(r"elev=(-?[\d.]+)_azi=(-?[\d.]+)", ref_image_path)
     match2 = re.search(r"elev=(-?[\d.]+)_azi=(-?[\d.]+)", target_image_path)
     if match1 and match2:
         print(f"start_rel: elev= {rel_elev_deg:5.1f}, azi= {rel_azi_deg:5.1f}")
-        gt_elev = float(match2.group(1)) - float(match1.group(1))
-        gt_azi = float(match2.group(2)) - float(match1.group(2))
-        if gt_azi > 180:
-            gt_azi -= 360
-        print(f"gt_rel:    elev= {gt_elev:5.1f}, azi= {gt_azi:5.1f}")
+        gt_elev_deg = float(match2.group(1)) - float(match1.group(1))
+        gt_azi_deg = float(match2.group(2)) - float(match1.group(2))
+        if gt_azi_deg > 180:
+            gt_azi_deg -= 360
+        print(f"gt_rel:    elev= {gt_elev_deg:5.1f}, azi= {gt_azi_deg:5.1f}")
     # endregion
 
-    # region tb_writer setup
-    curr_time = time.localtime(time.time())
-    mon = curr_time.tm_mon
-    mday = curr_time.tm_mday
-    hours = curr_time.tm_hour
-    mins = curr_time.tm_min + curr_time.tm_sec / 60
-    if conf.log.run_name != '':
-        writer_name = f'{conf.log.log_root}/{mon:02d}-{mday:02d}/{hours}-{mins:.1f}_{conf.log.run_name}_gt-{gt_elev:.0f}-{gt_azi:.0f}'+\
-                      f'_st-{rel_elev_deg:.0f}-{rel_azi_deg:.0f}'
-    else:
-        writer_name = f'{conf.log.log_root}/{mon:02d}-{mday:02d}/{hours}-{mins:.1f}_gt-{gt_elev:.0f}-{gt_azi:.0f}'+\
-                      f'_st-{rel_elev_deg:.0f}-{rel_azi_deg:.0f}'
-    tb_writer = writer.SummaryWriter(writer_name)
-    # endregion
-    
     main_run(conf = conf,
-             raw_im = ref_image, target_im = target_image,
+             input_im = ref_image, target_im = target_image,
              models = models, device = device,
              learning_rate = conf.model.lr,
-             gt_elevation = np.deg2rad(gt_elev),
-             gt_azimuth = np.deg2rad(gt_azi),
+             gt_elevation = np.deg2rad(gt_elev_deg),
+             gt_azimuth = np.deg2rad(gt_azi_deg),
              gt_radius = 0.0,
              preprocess=True,
              start_elevation = np.deg2rad(rel_elev_deg),
              start_azimuth = np.deg2rad(rel_azi_deg),
              start_radius = conf.input.rel_radius,
-             tb_writer = tb_writer,
              n_samples= conf.model.n_samples,
              scale= conf.model.guide_scale,
              ddim_eta= conf.model.ddim_eta,
