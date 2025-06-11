@@ -23,7 +23,7 @@ from transformers import AutoFeatureExtractor
 
 def load_model_from_config(config, ckpt, device, verbose=False):
     print(f'Loading model from {ckpt}')
-    pl_sd = torch.load(ckpt, map_location='cpu')
+    pl_sd = torch.load(ckpt, map_location=device)
     # if 'global_step' in pl_sd:
     #     print(f'Global Step: {pl_sd["global_step"]}')
     sd = pl_sd['state_dict']
@@ -39,8 +39,10 @@ def load_model_from_config(config, ckpt, device, verbose=False):
         print('unexpected keys:')
         print(u)
 
-    model.to(device)
-    model.train()
+    # model.to(device)
+    model.eval()
+    for p in model.parameters():
+        p.requires_grad = False
     return model
 
 def preprocess_image(models, input_im, preprocess, h=256, w=256, device='cuda'):
@@ -181,18 +183,10 @@ def main_run(conf,
     input_im, _ = preprocess_image(models, input_im, preprocess, h=h, w=w, device=device)
     target_im, target_mask = preprocess_image(models, target_im, preprocess, h=h, w=w, device=device)
     target_mask = Tensor(target_mask).to(device)
-    target_mask = target_mask.unsqueeze(0) #(1, H, W)
-    # print(target_mask.shape)
-    target_mask = transforms.Resize(int(256*1.2), interpolation=transforms.InterpolationMode.BILINEAR)(target_mask)
-    # print(target_mask.shape)
-    target_mask = transforms.CenterCrop((256, 256))(target_mask)[0]
-    # print(target_mask.shape)
-    clamp_input_im = torch.clamp((input_im + 1.0) / 2.0, min=0.0, max=1.0)
-    clamp_target_im = torch.clamp((target_im + 1.0) / 2.0, min=0.0, max=1.0)
-    wb_run.log({'Image/input_im':  wandb.Image(clamp_input_im[0],  caption=f"input_im"),
-                'Image/target_im': wandb.Image(clamp_target_im[0], caption=f"target_im"),
+    wb_run.log({'Image/input_im':  wandb.Image(torch.clamp((input_im + 1.0) / 2.0, min=0.0, max=1.0)[0],  caption=f"input_im"),
+                'Image/target_im': wandb.Image(torch.clamp((target_im + 1.0) / 2.0, min=0.0, max=1.0)[0], caption=f"target_im"),
     }, step=0)
-    """
+    """ NSFW content detection
     safety_checker_input = models['clip_fe'](raw_im, return_tensors='pt').to(device)
     (image, has_nsfw_concept) = models['nsfw'](
         images=np.ones((1, 3)), clip_input=safety_checker_input.pixel_values)
@@ -222,9 +216,9 @@ def main_run(conf,
     # optimizer = optim.Adam([{'params': est_elev},
     #                         {'params': est_azimuth}], lr=learning_rate)#{'params': est_radius, 'lr': 1e-18}
     optimizer = optim.Adam([{'params': est_azimuth, 'param_names': 'azi'}], lr=learning_rate)
-    assert conf.model.lr_scheduler
-    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=conf.model.lr_scheduler.milestones,
-                                               gamma=conf.model.lr_scheduler.gamma)
+    # assert conf.model.lr_scheduler
+    # scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=conf.model.lr_scheduler.milestones,
+    #                                            gamma=conf.model.lr_scheduler.gamma)
 
     max_iter = conf.model.iters
     from tqdm import tqdm
@@ -322,7 +316,7 @@ def main_run(conf,
                         decode_target_x0     = torch.clamp(decode_target_x0    , min=-1.0, max=1.0)
 
                 input_latent_loss = nn.functional.mse_loss(input_latent, target_latent)
-                decode_loss       = nn.functional.mse_loss(decode_target_x0, clamp_target_im)
+                decode_loss       = nn.functional.mse_loss(decode_target_x0, target_im)
 
                 wb_run.log({
                     'Loss/input_latent':    input_latent_loss.item(),
@@ -333,8 +327,8 @@ def main_run(conf,
             # endregion
 
         optimizer.step()
-        if conf.model.lr_scheduler.use:
-            scheduler.step()
+        # if conf.model.lr_scheduler.use:
+        #     scheduler.step()
         with torch.no_grad():
             temp_elev= np.rad2deg(start_elevation + est_elev.item())
             temp_azi= np.rad2deg(start_azimuth + est_azimuth.item())
@@ -408,6 +402,7 @@ if __name__ == '__main__':
     device = f"cuda:{conf.model.gpu_idx}"
     model_config_obj = OmegaConf.load(conf.model.model_config)
 
+    assert torch.cuda.is_available()
     assert os.path.exists(conf.model.ckpt)
     assert os.path.exists(ref_image_path)
 
@@ -441,7 +436,6 @@ if __name__ == '__main__':
         'CompVis/stable-diffusion-safety-checker')
 
     # region summary setup
-    # maybe use yaml to dict. directly put config file into w&b config.
     curr_time = time.localtime(time.time())
     mon = curr_time.tm_mon
     mday = curr_time.tm_mday
@@ -495,9 +489,9 @@ if __name__ == '__main__':
              start_elevation = np.deg2rad(rel_elev_deg),
              start_azimuth = np.deg2rad(rel_azi_deg),
              start_radius = conf.input.rel_radius,
-             n_samples= conf.model.n_samples,
-             scale= conf.model.guide_scale,
-             ddim_eta= conf.model.ddim_eta,
-             preprocess=True
+             n_samples = conf.model.n_samples,
+             scale = conf.model.guide_scale,
+             ddim_eta = conf.model.ddim_eta,
+             preprocess = True
             )
     wb_run.finish()

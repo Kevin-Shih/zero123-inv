@@ -69,6 +69,7 @@ def load_and_preprocess(interface, input_im):
     image = input_im.convert('RGB')
 
     image_without_background = interface([image])[0]
+    # image_without_background.save('../target.png')
     image_without_background = np.array(image_without_background)
     est_seg = image_without_background > 127
     image = np.array(image)
@@ -76,13 +77,21 @@ def load_and_preprocess(interface, input_im):
     image[~foreground] = [255., 255., 255.]
     x, y, w, h = cv2.boundingRect(foreground.astype(np.uint8))
     image = image[y:y+h, x:x+w, :]
+    foreground = foreground[y:y+h, x:x+w]
+    foreground = PIL.Image.fromarray(np.array(foreground))
     image = PIL.Image.fromarray(np.array(image))
-    
+
     # resize image such that long edge is 512
+    foreground.thumbnail([200, 200], Image.Resampling.LANCZOS)
+    # print('foreground size:', foreground.size)
+    foreground = add_margin(foreground, (0), size=256)
+    # foreground.save('../foreground.png')
+    foreground = np.array(foreground)
     image.thumbnail([200, 200], Image.Resampling.LANCZOS)
+    # print('image size:', image.size)
     image = add_margin(image, (255, 255, 255), size=256)
     image = np.array(image)
-    
+
     return image, foreground
 
 
