@@ -17,7 +17,7 @@ model:
   blur_k_ize: 3
   blur_min: 0.5
   blur_max: 2.0
-  clamp: partial_normal
+  clamp: null
 input:
   ref_image: "elev=0_azi=0.png"
   target_image: "elev=0_azi=10.png"
@@ -28,7 +28,7 @@ input:
   min_index: null
   input_type: "perfect" # for logging
 group_name: "PerfectInput_normal"
-run_name: "default_blur.5-2_WPartClamp"
+run_name: "default_blur.5-2_eta1_SampleThenMode"
 log_all_img: True
 comment: ""
 check_range: [-45, 45]

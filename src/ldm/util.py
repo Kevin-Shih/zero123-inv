@@ -76,9 +76,9 @@ def load_and_preprocess(interface, input_im):
     foreground = est_seg[:, : , -1].astype(np.bool_)
     image[~foreground] = [255., 255., 255.]
     x, y, w, h = cv2.boundingRect(foreground.astype(np.uint8))
-    image = image[y:y+h, x:x+w, :]
     foreground = foreground[y:y+h, x:x+w]
     foreground = PIL.Image.fromarray(np.array(foreground))
+    image = image[y:y+h, x:x+w, :]
     image = PIL.Image.fromarray(np.array(image))
 
     # resize image such that long edge is 512

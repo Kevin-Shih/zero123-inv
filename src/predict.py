@@ -48,6 +48,7 @@ def sample_model(input_im, model, sampler, precision, h, w,
                  elevation, azimuth, radius):
     precision_scope = autocast if precision == 'autocast' else nullcontext
     with precision_scope('cuda'):
+        model.use_ema = False
         with model.ema_scope():
             c = model.get_learned_conditioning(input_im).tile(n_samples, 1, 1)
             T = torch.tensor([elevation, math.sin(azimuth), math.cos(azimuth), radius])
@@ -90,7 +91,7 @@ def preprocess_image(models, input_im, preprocess):
     start_time = time.time()
 
     if preprocess:
-        input_im = load_and_preprocess(models['carvekit'], input_im)
+        input_im,_ = load_and_preprocess(models['carvekit'], input_im)
         input_im = (input_im / 255.0).astype(np.float32)
         # (H, W, 3) array in [0, 1].
     else:
@@ -212,7 +213,7 @@ def predict(device_idx: int = _GPU_INDEX,
             radius: float = 0.0,
             azimuth_step: float = 0.0,
             output_img_name: str = "output.png"):
-    device = f"cuda:{device_idx}"
+    device = f"cuda:{0}"
     print('device = ',device)
     config_obj = OmegaConf.load(config)
 

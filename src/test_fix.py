@@ -1,21 +1,23 @@
 import os
 import argparse
-import numpy as np
+import yaml
 import time
 import re
 import wandb
 import torch
+import numpy as np
 from omegaconf import OmegaConf
 from PIL import Image
 from rich import print
 from lovely_numpy import lo
-
 from contextlib import nullcontext
+from tqdm import tqdm
+
 # from diffusers.pipelines.stable_diffusion import StableDiffusionSafetyChecker
 from ldm.models.diffusion.ddim import DDIMSampler
 from ldm.models.diffusion.ddpm import LatentDiffusion
 from ldm.util import create_carvekit_interface, load_and_preprocess, instantiate_from_config
-from torch import Tensor, optim, nn, tensor
+from torch import Tensor, optim, nn
 from torch.nn.parameter import Parameter
 from torch.amp.autocast_mode import autocast
 from torchvision import transforms
@@ -23,7 +25,7 @@ from transformers import AutoFeatureExtractor
 
 def load_model_from_config(config, ckpt, device, verbose=False):
     print(f'Loading model from {ckpt}')
-    pl_sd = torch.load(ckpt, map_location=device)
+    pl_sd = torch.load(ckpt, map_location='cpu')
     # if 'global_step' in pl_sd:
     #     print(f'Global Step: {pl_sd["global_step"]}')
     sd = pl_sd['state_dict']
@@ -31,7 +33,6 @@ def load_model_from_config(config, ckpt, device, verbose=False):
     if not isinstance(model, LatentDiffusion):
         raise TypeError("The instantiated model is not of type LatentDiffusion")
     m, u = model.load_state_dict(sd, strict=False)
-    # print('model type:', type(model))
     if len(m) > 0 and verbose:
         print('missing keys:')
         print(m)
@@ -39,10 +40,9 @@ def load_model_from_config(config, ckpt, device, verbose=False):
         print('unexpected keys:')
         print(u)
 
-    # model.to(device)
+    model.to(device)
+    # model.train()
     model.eval()
-    for p in model.parameters():
-        p.requires_grad = False
     return model
 
 def preprocess_image(models, input_im, preprocess, h=256, w=256, device='cuda'):
@@ -81,15 +81,15 @@ def preprocess_image(models, input_im, preprocess, h=256, w=256, device='cuda'):
         print('new input_im:', lo(input_im))
 
     input_im = transforms.ToTensor()(input_im).unsqueeze(0).to(device)
-    input_im = input_im * 2 - 1
+    input_im = input_im * 2 - 1 # move to [-1, 1]
     input_im = transforms.Resize([h, w])(input_im)
     return input_im, forground_mask
 
 def calculate_param_ddim(sampler, index, n_samples, device):
     alphas = sampler.ddim_alphas
     alphas_prev = sampler.ddim_alphas_prev
-    sqrt_one_minus_alphas = sampler.ddim_sqrt_one_minus_alphas
     sigmas = sampler.ddim_sigmas
+    sqrt_one_minus_alphas = sampler.ddim_sqrt_one_minus_alphas
     # select parameters corresponding to the currently considered timestep
     a_t = torch.full((n_samples, 1, 1, 1), alphas[index], device=device)
     a_prev = torch.full((n_samples, 1, 1, 1), alphas_prev[index], device=device)
@@ -104,9 +104,9 @@ def sample_model(input_im, target_im, LDModel, precision, h, w,
     step_target_inter = int(1000//ddim_steps) if index > 0 else 1
     precision_scope = autocast if precision == 'autocast' else nullcontext
     sampler = DDIMSampler(LDModel)
-    sampler.make_schedule(ddim_num_steps=ddim_steps, ddim_eta=ddim_eta, verbose=False)
+    sampler.make_schedule(ddim_num_steps=ddim_steps, ddim_discretize="uniform", ddim_eta=ddim_eta, verbose=False)
     with precision_scope('cuda'):
-        # with LDModel.ema_scope():
+        with LDModel.ema_scope():
             # region input/condition
             # Set time step and noisy latent shape
             t = torch.full((n_samples,), step, device=input_im.device, dtype=torch.long)
@@ -129,11 +129,11 @@ def sample_model(input_im, target_im, LDModel, precision, h, w,
             img_cond = LDModel.get_learned_conditioning(input_im).tile(n_samples, 1, 1)
             T = torch.cat([elevation, torch.sin(azimuth), torch.cos(azimuth), radius])
             T_batch = T[None, None, :].repeat(n_samples, 1, 1)
-            c = torch.cat([img_cond, T_batch], dim=-1)
+            c = torch.cat([img_cond, T_batch], dim=-1).float()
             c_proj = LDModel.cc_projection(c)
             cond = {}
             cond['c_crossattn'] = [c_proj]
-            cond['c_concat'] = [input_encoder_posterior.mode().repeat(n_samples, 1, 1, 1)]
+            cond['c_concat'] = [input_encoder_posterior.mode().detach().repeat(n_samples, 1, 1, 1)]
             uc = {}
             uc['c_concat'] = [torch.zeros(size, device=img_cond.device)]
             uc['c_crossattn'] = [torch.zeros_like(c_proj, device=img_cond.device)]
@@ -160,9 +160,9 @@ def sample_model(input_im, target_im, LDModel, precision, h, w,
             a_t, a_prev, sigma_t, sqrt_one_minus_at = sampler.calculate_param_ddim(index, n_samples, img_cond.device)
             pred_x0 = (input_latent - sqrt_one_minus_at * e_t) / a_t.sqrt() # current prediction for x_0
             dir_xt = (1. - a_prev - sigma_t**2).sqrt() * e_t # direction pointing to x_t
-            x_indexminus1 = a_prev.sqrt() * pred_x0 + dir_xt + sigma_t * _noise
+            pred_x_idx_minus_one = a_prev.sqrt() * pred_x0 + dir_xt + sigma_t * _noise
 
-            return x_indexminus1, pred_x0, input_latent, target_latent, target_im_z, latent_diff, latent_x0_diff
+            return pred_x_idx_minus_one, pred_x0, input_latent, target_latent, target_im_z, latent_diff, latent_x0_diff
 
 def main_run(conf,
              input_im, target_im,
@@ -216,16 +216,15 @@ def main_run(conf,
     # optimizer = optim.Adam([{'params': est_elev},
     #                         {'params': est_azimuth}], lr=learning_rate)#{'params': est_radius, 'lr': 1e-18}
     optimizer = optim.Adam([{'params': est_azimuth, 'param_names': 'azi'}], lr=learning_rate)
-    # assert conf.model.lr_scheduler
+
     # scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=conf.model.lr_scheduler.milestones,
     #                                            gamma=conf.model.lr_scheduler.gamma)
 
     max_iter = conf.model.iters
-    from tqdm import tqdm
     pbar = tqdm(range(max_iter), desc='DDIM', total=max_iter, ncols=140)
     max_index = conf.input.max_index
     min_index = max_index if conf.input.min_index is None else max(conf.input.min_index, 0)
-    interval = max_iter / (max_index - min_index + 1)
+    idx_decrease_interval = max_iter / (max_index - min_index + 1)
     for i, iter in enumerate(pbar, start=1):
         pbar.set_description_str(f'[{iter}/{max_iter}]')
         optimizer.zero_grad()
@@ -238,12 +237,11 @@ def main_run(conf,
         else:
             index = np.random.randint(min_index, 10)
         """
-        index = int(max_index - iter//interval)
-        step = int(1000//75) * max(index, 0) + 1
-        pred_target, pred_x0, input_latent, target_latent, target_im_z,\
+        index = int(max_index - iter//idx_decrease_interval)
+        pred_target, pred_x0, input_latent, target_latent, target_latent_x0,\
         latent_diff, latent_x0_diff  = sample_model(input_im, target_im, LDModel, precision,
-                                                     h, w, est_elev, est_azimuth, est_radius, n_samples= n_samples, scale= scale,
-                                                     ddim_steps= ddim_steps, ddim_eta= ddim_eta, index= index)
+                                                    h, w, est_elev, est_azimuth, est_radius, n_samples= n_samples, scale= scale,
+                                                    ddim_steps= ddim_steps, ddim_eta= ddim_eta, index= index)
         decode_pred_target   = LDModel.decode_first_stage(pred_target)
         decode_pred_x0       = LDModel.decode_first_stage(pred_x0)
         decode_target_latent = LDModel.decode_first_stage(target_latent)
@@ -276,7 +274,7 @@ def main_run(conf,
         mask_blur_target_im              = blur_target_im            * target_mask.float()
 
         latent_loss    = nn.functional.mse_loss(pred_target, target_latent)
-        latent_x0_loss = nn.functional.mse_loss(pred_x0, target_im_z.expand_as(pred_x0))
+        latent_x0_loss = nn.functional.mse_loss(pred_x0, target_latent_x0.expand_as(pred_x0))
         img_loss       = nn.functional.mse_loss(decode_pred_target, decode_target_latent)
         img_x0_loss    = nn.functional.mse_loss(decode_pred_x0, target_im.expand_as(blur_decode_pred_x0))
         blur_img_loss       = nn.functional.mse_loss(blur_decode_pred_target, blur_decode_target_latent)
@@ -295,7 +293,7 @@ def main_run(conf,
         blur_mask_img_x0_loss = _blur_mask_img_x0_loss / non_zero_elements
 
         neg_latent_x0_loss = -1.0 * latent_x0_loss
-        loss = blur_mask_img_x0_loss.clone().detach()
+        loss = blur_mask_img_x0_loss.clone()
         if conf.model.loss_amp:
             loss = loss * conf.model.loss_amp
         loss.backward()
@@ -304,7 +302,7 @@ def main_run(conf,
             # region detail logging
             with torch.no_grad():
                 decode_input_latent  = LDModel.decode_first_stage(input_latent)
-                decode_target_x0     = LDModel.decode_first_stage(target_im_z)
+                decode_target_x0     = LDModel.decode_first_stage(target_latent_x0)
 
                 if conf.model.clamp is not None:
                     print(f'clamping output: {conf.model.clamp}')
@@ -330,11 +328,13 @@ def main_run(conf,
         # if conf.model.lr_scheduler.use:
         #     scheduler.step()
         with torch.no_grad():
-            temp_elev= np.rad2deg(start_elevation + est_elev.item())
-            temp_azi= np.rad2deg(start_azimuth + est_azimuth.item())
+            temp_elev= np.rad2deg(est_elev.item())
+            temp_azi= np.rad2deg(est_azimuth.item())
 
             err = [temp_elev - np.rad2deg(gt_elevation), temp_azi - np.rad2deg(gt_azimuth)]
-            pbar.set_postfix_str(f'step: {index}-{step}, loss: {loss.item():.3f}, Err elev, azi= {err[0]:.2f}, {err[1]:.2f}, Curr= {temp_elev:.2f}, {temp_azi:.2f}')
+            pbar.set_postfix_str(f'step: {index}-{int(1000//ddim_steps) * max(index, 0) + 1}, ' +
+                                 f'loss: {loss.item():.3f}, Err elev, azi= {err[0]:.2f}, {err[1]:.2f}, ' +
+                                 f'Curr= {temp_elev:.2f}, {temp_azi:.2f}')
             wb_run.log({
                 "Estimate/elevation":           temp_elev,
                 "Estimate/azimuth":             temp_azi,
@@ -373,15 +373,6 @@ def main_run(conf,
 
 
 if __name__ == '__main__':
-    '''
-    python test.py --ckpt ../105000.ckpt
-        --ref_image_path "data/gso_alarm_my_render/elev=0_azi=0.png"
-        --target_image_path "data/gso_alarm_my_render/elev=0_azi=10.png"
-        --rel_elevation_in_degree 0.0
-        --rel_azimuth_in_degree 0.0
-        --rel_radius 0.0
-        --run_name test
-    '''
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "-c",
@@ -391,8 +382,8 @@ if __name__ == '__main__':
         help="path to configs to load OmegaConf from"
     )
     args = parser.parse_args()
-    print(f'Loading configs from {os.path.basename(args.config)}...')
     conf = OmegaConf.load(args.config)
+    print(f'Loading configs from {os.path.basename(args.config)}...')
 
     ref_image_path = os.path.join(conf.dataroot, conf.input.ref_image)
     target_image_path = os.path.join(conf.dataroot, conf.input.target_image)
@@ -405,8 +396,9 @@ if __name__ == '__main__':
     assert torch.cuda.is_available()
     assert os.path.exists(conf.model.ckpt)
     assert os.path.exists(ref_image_path)
+    # assert conf.model.lr_scheduler
 
-    # Load image and check gt.
+    # region Load image and check gt.
     ref_image = Image.open(ref_image_path)
     target_image = Image.open(target_image_path)
     gt_elev_deg = 0
@@ -419,8 +411,9 @@ if __name__ == '__main__':
         if gt_azi_deg > 180:
             gt_azi_deg -= 360
         print(f"start_rel: elev= {rel_elev_deg}, azi= {rel_azi_deg} | gt_rel: elev= {gt_elev_deg}, azi= {gt_azi_deg}")
+    # endregion
 
-    # Instantiate all models beforehand for efficiency.
+    # region Instantiate all models beforehand for efficiency.
     models = dict()
     print('Instantiating LatentDiffusion...', end='\r')
     models['turncam'] = load_model_from_config(model_config_obj, conf.model.ckpt, device=device, verbose=True)
@@ -434,6 +427,7 @@ if __name__ == '__main__':
     print('Instantiating AutoFeatureExtractor...', end='\r')
     models['clip_fe'] = AutoFeatureExtractor.from_pretrained(
         'CompVis/stable-diffusion-safety-checker')
+    # endregion
 
     # region summary setup
     curr_time = time.localtime(time.time())
@@ -441,8 +435,6 @@ if __name__ == '__main__':
     mday = curr_time.tm_mday
     hours = curr_time.tm_hour
     mins = curr_time.tm_min + curr_time.tm_sec / 60
-    # writer_name = f'{mon:02d}-{mday:02d}/{hours}-{mins:.1f}_{conf.run_name}_gt-{gt_elev_deg:.0f}-{gt_azi_deg:.0f}'+\
-    #               f'_st-{rel_elev_deg:.0f}-{rel_azi_deg:.0f}'
     wb_run = wandb.init(
         entity="kevin-shih",
         project="Zero123-Adv",
@@ -450,35 +442,15 @@ if __name__ == '__main__':
         name= f'{conf.run_name}_gt-{gt_elev_deg:.0f}-{gt_azi_deg:.0f}',
         settings=wandb.Settings(x_disable_stats=True),
         config={
-            "start_date": f'{mon:02d}-{mday:02d}',
-            "start_time": f'{hours:02d}-{mins:4.1f}',
-            "dataroot": conf.dataroot,
-            "gt_elev": f'{gt_elev_deg:.1f}',
-            "gt_azi": f'{gt_azi_deg:.1f}',
-            "model":{
-                "learning_rate": conf.model.lr,
-                "n_samples": conf.model.n_samples,
-                "loss_type": conf.model.loss_type,
-                "loss_amp": conf.model.loss_amp,
-                "iters": conf.model.iters,
-            },
-            "lr_scheduler":{
-                "use": conf.model.lr_scheduler.use,
-                "milestones": conf.model.lr_scheduler.milestones if conf.model.lr_scheduler.use else None,
-                "gamma": conf.model.lr_scheduler.gamma if conf.model.lr_scheduler.use else None,
-            },
-            "input": {
-                "reference_image": conf.input.ref_image,
-                "target_image": conf.input.target_image,
-                "init_elev": f'{rel_elev_deg:.1f}',
-                "init_azi": f'{rel_azi_deg:.1f}',
-                "max_index": conf.input.max_index,
-                "min_index": conf.input.min_index,
-                "input_type": conf.input.input_type,
-            },
+                "start_date": f'{mon:02d}-{mday:02d}',
+                "start_time": f'{hours:02d}-{mins:4.1f}',
+                "gt_elev_deg": f'{gt_elev_deg:.1f}',
+                "gt_azi_deg": f'{gt_azi_deg:.1f}',
+                **yaml.load(open(args.config, 'r'), Loader=yaml.SafeLoader),
         },
     )
     # endregion
+
     main_run(conf = conf,
              input_im = ref_image, target_im = target_image,
              models = models, device = device,

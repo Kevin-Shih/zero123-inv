@@ -327,15 +327,15 @@ class DDPM(pl.LightningModule):
         return (extract_into_tensor(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
                 extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise)
     
-    def q_sample_2(self, input_start, target_start, t_in, t_target, noise=None):
-        noise = default(noise, lambda: torch.randn_like(input_start))
-        noisy_input = (extract_into_tensor(self.sqrt_alphas_cumprod, t_in, input_start.shape) * input_start +
-                       extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t_in, input_start.shape) * noise)
-        noisy_target = (extract_into_tensor(self.sqrt_alphas_cumprod, t_target, target_start.shape) * target_start +
-                       extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t_target, target_start.shape) * noise)
-        noise_target = (extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t_in, input_start.shape) - 
-                        extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t_target, target_start.shape)) * noise
-        return noisy_input, noisy_target, noise_target
+    # def q_sample_2(self, input_start, target_start, t_in, t_target, noise=None):
+    #     noise = default(noise, lambda: torch.randn_like(input_start))
+    #     noisy_input = (extract_into_tensor(self.sqrt_alphas_cumprod, t_in, input_start.shape) * input_start +
+    #                    extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t_in, input_start.shape) * noise)
+    #     noisy_target = (extract_into_tensor(self.sqrt_alphas_cumprod, t_target, target_start.shape) * target_start +
+    #                    extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t_target, target_start.shape) * noise)
+    #     noise_target = (extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t_in, input_start.shape) - 
+    #                     extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t_target, target_start.shape)) * noise
+    #     return noisy_input, noisy_target, noise_target
 
     def get_loss(self, pred, target, mean=True):
         if self.loss_type == 'l1':
@@ -770,7 +770,7 @@ class LatentDiffusion(DDPM):
             out.append(xc)
         return out
 
-    
+    # @torch.no_grad()
     def decode_first_stage(self, z, predict_cids=False, force_not_quantize=False):
         if predict_cids:
             if z.dim() == 4:
@@ -872,7 +872,7 @@ class LatentDiffusion(DDPM):
 
     def shared_step(self, batch, **kwargs):
         x, c = self.get_input(batch, self.first_stage_key)
-        loss = self(x, c)
+        loss = self(x, c, **kwargs)
         return loss
 
     def forward(self, x, c, *args, **kwargs):
@@ -921,7 +921,7 @@ class LatentDiffusion(DDPM):
             # Reshape to img shape
             z = z.view((z.shape[0], -1, ks[0], ks[1], z.shape[-1]))  # (bn, nc, ks[0], ks[1], L )
             z_list = [z[:, :, :, :, i] for i in range(z.shape[-1])]
-            print(f"self.cond_stage_key= {self.cond_stage_key}, self.model.conditioning_key={self.model.conditioning_key}")
+            # print(f"self.cond_stage_key= {self.cond_stage_key}, self.model.conditioning_key={self.model.conditioning_key}")
             if self.cond_stage_key in ["image", "LR_image", "segmentation", 'bbox_img'] and self.model.conditioning_key:  # todo check for completeness
                 c_key = next(iter(cond.keys()))  # get key
                 c = next(iter(cond.values()))  # get value
