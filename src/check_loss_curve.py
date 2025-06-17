@@ -20,6 +20,7 @@ from torch import Tensor, optim, nn
 from torch.amp.autocast_mode import autocast
 from torchvision import transforms
 from transformers import AutoFeatureExtractor
+from einops import rearrange
 
 
 def load_model_from_config(config, ckpt, device, verbose=False):
@@ -195,9 +196,189 @@ def sample_model(input_im, target_im, LDModel, precision, h, w,
             # direction pointing to x_t
             dir_xt = (1. - a_prev - sigma_t**2).sqrt() * e_t
             pred_x_idx_minus_one = a_prev.sqrt() * pred_x0 + dir_xt + sigma_t * _noise
+            noise_loss = torch.nn.functional.mse_loss(LDModel.apply_model(input_latent, t, cond), _noise)
 
-            return pred_x_idx_minus_one, pred_x0, input_latent, target_latent, target_im_z, latent_diff, latent_x0_diff
+            return pred_x_idx_minus_one, pred_x0, input_latent, target_latent, target_im_z, latent_diff, latent_x0_diff, noise_loss
 
+class PoseT(torch.nn.Module):
+    
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self, pose):
+
+        p1 = pose[..., 0:1]
+        p2 = torch.sin(pose[..., 1:2])
+        p3 = torch.cos(pose[..., 1:2])
+        p4 = pose[..., 2:]
+
+        return torch.cat([p1, p2, p3, p4], dim=-1)
+
+def create_pose_params(pose, device):
+
+    theta = torch.tensor([pose[0]], requires_grad=True, device=device)
+    azimuth = torch.tensor([pose[1]], requires_grad=True, device=device)
+    radius = torch.tensor([pose[2]], requires_grad=True, device=device)
+
+    return [theta, azimuth, radius]
+
+def create_random_pose():
+
+    theta = np.random.rand() * np.pi - np.pi / 2
+    azimuth = np.random.rand() * np.pi * 2
+    radius = np.random.rand() - 0.5
+    
+    return [theta, azimuth, radius]
+
+def get_inv_pose(pose):
+
+    return [-pose[0], np.pi*2 - pose[1], -pose[2]]
+
+def find_optimal_poses(model, images, learning_rate, bsz=1, n_iter=1000, init_poses={}, ts_range=[0.02, 0.92], combinations=None, print_n=50, avg_last_n=1):
+    
+    layer = PoseT()
+
+    num = len(images)
+
+    batch = {}
+
+    pose_params = { i:[] for i in range(1, num)}
+    pose_trajs = { i:[]  for i in range(1, num) }
+
+    for i in range(1, num):
+
+        if i in init_poses:
+            init_pose = init_poses[i]
+        else:
+            init_pose = create_random_pose()
+
+        pose = create_pose_params(init_pose, model.device)
+        pose_params[i] = pose
+
+    if combinations is None:
+        combinations = []
+        for i in range(0, num):
+            for j in range(i+1, num):
+                combinations.append((i, j))
+                combinations.append((j, i))
+
+    param_list = []
+    for i in pose_params:
+        param_list += pose_params[i]
+
+    optimizer = torch.optim.SGD(param_list, lr = learning_rate)
+
+    loss_traj = []
+    select_indces = set([])
+                                
+    for iter in range(0, n_iter):
+
+        if print_n > 0 and iter % print_n == 0 and iter > 0:
+            print(iter, np.mean(loss_traj[-avg_last_n:]), flush=True)
+            for i in range(1, num):
+                print(0, i, np.mean(pose_trajs[i][-avg_last_n:], axis=0).tolist())
+
+        '''record poses'''
+        for i in select_indces:
+            pose = pose_params[i]
+            pose_trajs[i].append([pose[0].item(), pose[1].item(), pose[2].item()])
+
+        select_indces = set([])
+
+        conds = []
+        targets = []
+        rts = []
+
+        choices = [ iter % len(combinations) ] 
+        
+        if bsz > 1:
+            choices = np.random.choice(len(combinations), size=bsz, replace=True)
+
+        for cho in choices:
+
+            i, j = combinations[cho]
+
+            conds.append(images[i])
+            targets.append(images[j])
+            if i == 0:
+                pose = pose_params[j]
+                select_indces.add(j)
+            
+            elif j == 0:
+                pose = get_inv_pose(pose_params[i])
+                select_indces.add(i)
+
+            else:
+                pose0j = pose_params[j]
+                posei0 = get_inv_pose(pose_params[i])
+
+                if np.random.rand() < 0.5:
+                    posei0 = [a.item() for a in posei0]
+                    select_indces.add(j)
+                else:
+                    pose0j = [b.item() for b in pose0j]
+                    select_indces.add(i)
+
+                #pose = [ torch.remainder(a+b+2*np.pi, 2*np.pi) - np.pi for a, b in zip(posei0, pose0j) ]
+                pose = [ a+b for a, b in zip(posei0, pose0j) ]
+
+            rts.append(torch.cat(pose)[None, ...])
+
+        batch['image_cond'] = torch.cat(conds, dim=0)
+        batch['image_target'] = torch.cat(targets, dim=0)
+        batch['T'] = layer(torch.cat(rts, dim=0))
+        ts = np.arange(ts_range[0], ts_range[1], (ts_range[1]-ts_range[0]) / len(conds))
+        # print('ts=',ts)
+        # print(f'batch["image_cond"].shape: {batch["image_cond"].shape}')
+        # print(f'conds.shape: {len(conds), conds[0].shape}')
+        optimizer.zero_grad()
+        loss, loss_dict = model.shared_step(batch, ts=ts)
+        loss.backward()
+
+        optimizer.step()
+
+        loss_traj.append(loss.item())
+
+    if n_iter > 0:
+        result_poses = [np.mean(pose_trajs[i][-avg_last_n:], axis=0).tolist() for i in range(1, num) ]
+        result_loss = np.mean(loss_traj[-avg_last_n:])
+    else:
+        result_poses = [ init_poses[i] for i in range(1, num) ]
+        result_loss = None
+
+    return result_poses, [ init_poses[i] for i in range(1, num) ], result_loss
+
+def idp_noise_loss(model, cond_image, target_image, pose, ts_range, bsz, noise=None):
+
+    mx = ts_range[1]
+    mn = ts_range[0]
+
+    pose_layer = PoseT()
+
+    batch = {}
+    batch['image_target'] = target_image.repeat(bsz, 1, 1, 1)
+    batch['image_cond'] = cond_image.repeat(bsz, 1, 1, 1)
+    batch['T'] = pose_layer(pose.detach()).repeat(bsz, 1)
+
+    if noise is not None:
+        noise = torch.tensor(noise, dtype=model.dtype, device=model.device)
+    else:
+        noise = torch.randn(bsz, 4, 32, 32, device=model.device)
+    loss, loss_dict = model.shared_step(batch, ts=np.arange(mn, mx, (mx-mn) / bsz), noise=noise[:bsz])
+
+    return loss.item(), loss_dict
+
+
+def idp_pairwise_loss(pose, model, cond_image, target_image, ts_range, probe_bsz, noise=None):
+
+    theta, azimuth, radius = pose
+
+    pose1 = torch.tensor([[theta, azimuth, radius]], device=model.device, dtype=torch.float32)
+    pose2 = torch.tensor([[-theta, np.pi*2-azimuth, -radius]], device=model.device, dtype=torch.float32)
+    loss1, loss_dict1 = idp_noise_loss(model, cond_image, target_image, pose1, ts_range, probe_bsz, noise=noise)
+    loss2, loss_dict2 = idp_noise_loss(model, target_image, cond_image, pose2, ts_range, probe_bsz, noise=noise)
+
+    return loss1 + loss2, loss_dict1, loss_dict2
 
 def main_run(conf,
              input_im, target_im,
@@ -263,7 +444,7 @@ def main_run(conf,
     group_mday = curr_time.tm_mday
     group_hours = curr_time.tm_hour
     group_mins = curr_time.tm_min // 5 * 5
-    blur = transforms.GaussianBlur(kernel_size=[conf.model.blur_k_ize], sigma = (conf.model.blur_min, conf.model.blur_max))
+    blur = transforms.GaussianBlur(kernel_size=[conf.model.blur_k_size], sigma = (conf.model.blur_min, conf.model.blur_max))
     for i, index in enumerate(range(min_index, max_index + 1, 2), 0):
         decode_loss_index = []
         latent_loss_index = []
@@ -304,7 +485,7 @@ def main_run(conf,
             pbar.set_description_str(f'[{j}/{max_iter}]')
             with torch.no_grad():
                 pred_target, pred_x0, input_latent, target_latent, target_im_z,\
-                latent_diff, latent_x0_diff = sample_model(input_im, target_im, LDModel, precision, h, w, 
+                latent_diff, latent_x0_diff, noise_loss = sample_model(input_im, target_im, LDModel, precision, h, w, 
                                                            start_elevation, start_azimuth[iter].unsqueeze(0), 
                                                            start_radius, n_samples= n_samples, scale= scale,
                                                            ddim_steps= ddim_steps, ddim_eta= ddim_eta, index= index)
@@ -344,15 +525,15 @@ def main_run(conf,
                 pred_latent_diff    = input_latent - pred_target
                 pred_latent_x0_diff = input_latent - pred_x0
 
-                decode_loss       = nn.functional.mse_loss(decode_target_x0, _target_im_copy.expand_as(decode_target_x0))
+                # decode_loss       = nn.functional.mse_loss(decode_target_x0, _target_im_copy.expand_as(decode_target_x0))
                 blur_decode_loss  = nn.functional.mse_loss(blur_decode_target_x0, blur_target_im.expand_as(decode_target_x0))
                 input_latent_loss = nn.functional.mse_loss(input_latent, target_latent)
-                noise_loss        = nn.functional.mse_loss(pred_latent_diff, latent_diff) # loss between latent_diff and denoised diff
-                noise_x0_loss     = nn.functional.mse_loss(pred_latent_x0_diff, latent_x0_diff) # loss between latent_x0_diff and denoised x0 diff
+                latent_diff_loss        = nn.functional.mse_loss(pred_latent_diff, latent_diff) # loss between latent_diff and denoised diff
+                latent_diff_x0_loss     = nn.functional.mse_loss(pred_latent_x0_diff, latent_x0_diff) # loss between latent_x0_diff and denoised x0 diff
                 latent_loss       = nn.functional.mse_loss(pred_target, target_latent)
                 latent_x0_loss    = nn.functional.mse_loss(pred_x0, target_im_z.expand_as(pred_x0))
-                img_loss          = nn.functional.mse_loss(decode_pred_target, decode_target_latent)
-                img_x0_loss       = nn.functional.mse_loss(decode_pred_x0, _target_im_copy.expand_as(decode_pred_x0))
+                # img_loss          = nn.functional.mse_loss(decode_pred_target, decode_target_latent)
+                # img_x0_loss       = nn.functional.mse_loss(decode_pred_x0, _target_im_copy.expand_as(decode_pred_x0))
                 blur_img_loss     = nn.functional.mse_loss(blur_decode_pred_target, blur_decode_target_latent)
                 blur_img_x0_loss  = nn.functional.mse_loss(blur_decode_pred_x0, blur_target_im.expand_as(blur_decode_pred_x0))
                 # img_loss          = nn.functional.mse_loss(decode_pred_target, decode_target_latent) - decode_loss
@@ -372,6 +553,7 @@ def main_run(conf,
                 _blur_mask_img_x0_loss  = (no_reduct_mse(blur_decode_pred_x0, blur_target_im.expand_as(blur_decode_pred_x0)) * target_mask.float()).sum()
                 blur_mask_img_x0_loss   = _blur_mask_img_x0_loss / non_zero_elements
 
+                # region alternate loss
                 # _mask_img_loss      = (no_reduct_mse(decode_pred_target, decode_target_latent) * target_mask.float()).sum()
                 # mask_img_loss       = _mask_img_loss / non_zero_elements - decode_loss
                 # _mask_img_x0_loss   = (no_reduct_mse(decode_pred_x0, _target_im_copy.expand_as(decode_pred_x0)) * target_mask.float()).sum()
@@ -382,11 +564,20 @@ def main_run(conf,
                 # _blur_mask_img_x0_loss  = (no_reduct_mse(blur_decode_pred_x0, blur_target_im.expand_as(blur_decode_pred_x0)) * target_mask.float()).sum()
                 # blur_mask_img_x0_loss   = _blur_mask_img_x0_loss / non_zero_elements  - blur_decode_loss
                 
-                latent_loss_index.append(latent_loss.item())
-                latent_x0_loss_index.append(latent_x0_loss.item())
-                img_loss_index.append(img_loss.item())
-                img_loss_x0_index.append(img_x0_loss.item())
-                decode_loss_index.append(decode_loss.item())
+                # latent_loss_index.append(latent_loss.item())
+                # latent_x0_loss_index.append(latent_x0_loss.item())
+                # img_loss_index.append(img_loss.item())
+                # img_loss_x0_index.append(img_x0_loss.item())
+                # decode_loss_index.append(decode_loss.item())
+                #endregion
+
+                idp_pose=torch.cat([start_elevation, start_azimuth[iter].unsqueeze(0), start_radius], dim=-1)
+                raw_input_im = rearrange(input_im,'b c h w -> b h w c')
+                raw_target_im = rearrange(target_im,'b c h w -> b h w c')
+                idp_single_loss, loss_dict = idp_noise_loss(LDModel, raw_input_im, raw_target_im, idp_pose,
+                                                ts_range=[0.2, 0.21], bsz=1, noise=None)
+                idp_pair_loss,_,_ = idp_pairwise_loss(idp_pose, LDModel, raw_input_im, raw_target_im, ts_range=[0.2, 0.21], probe_bsz=1, noise=None)
+
 
                 total_loss = blur_mask_img_x0_loss.clone().detach()
                 if conf.model.loss_amp:
@@ -406,24 +597,29 @@ def main_run(conf,
                     "Estimate/azimuth":         temp_azi,
                     'Error/elevation':          err[0],
                     'Error/azimuth':            err[1],
-                    'Error/Abs elevation':      np.abs(err[0]),
-                    'Error/Abs azimuth':        np.abs(err[1]),
-                    'Loss/img':                 img_loss.item(),
-                    'Loss/img_x0':              img_x0_loss.item(),
+                    # 'Error/Abs elevation':      np.abs(err[0]),
+                    # 'Error/Abs azimuth':        np.abs(err[1]),
+                    # 'Loss/img':                 img_loss.item(),
+                    # 'Loss/img_x0':              img_x0_loss.item(),
                     'Loss/mask_img':            mask_img_loss.item(),
                     'Loss/mask_img_x0':         mask_img_x0_loss.item(),
                     'Loss/blur_img':            blur_img_loss.item(),
                     'Loss/blur_img_x0':         blur_img_x0_loss.item(),
                     'Loss/blur_mask_img':       blur_mask_img_loss.item(),
                     'Loss/blur_mask_img_x0':    blur_mask_img_x0_loss.item(),
-                    'Loss/noise_loss':          noise_loss.item(),
-                    'Loss/noise_x0_loss':       noise_x0_loss.item(),
+                    'Loss/latent_diff_loss':          latent_diff_loss.item(),
+                    'Loss/latent_diff_x0_loss':       latent_diff_x0_loss.item(),
                     'Loss/latent':              latent_loss.item(),
                     'Loss/latent_x0':           latent_x0_loss.item(),
                     'Loss/neg_latent_x0':       -1 * latent_x0_loss.item(),
                     'Loss/input_latent':        input_latent_loss.item(),
-                    'Loss/decode':              decode_loss.item(),
+                    # 'Loss/decode':              decode_loss.item(),
                     'Loss/blur_decode':         blur_decode_loss.item(),
+                    'Loss/idp_single_loss':     idp_single_loss,
+                    'Loss/idp_pair_loss':       idp_pair_loss,
+                    'Loss/noise_loss':          noise_loss.item(),
+                    'Loss/idp_simple_loss':     loss_dict['val/loss_simple'].item(),
+                    'Loss/idp_vlb_loss':        loss_dict['val/loss_vlb'].item(),
                 }, step=iter)
                 if iter % 10 == 0:
                     wb_run.log({
@@ -443,11 +639,11 @@ def main_run(conf,
                     }, step=iter)
             # endregion
         wb_run.finish()
-        latent_loss_all.append(latent_loss_index)
-        latent_x0_loss_all.append(latent_x0_loss_index)
-        img_loss_all.append(img_loss_index)
-        img_loss_x0_all.append(img_loss_x0_index)
-        decode_loss_all.append(decode_loss_index)
+        # latent_loss_all.append(latent_loss_index)
+        # latent_x0_loss_all.append(latent_x0_loss_index)
+        # img_loss_all.append(img_loss_index)
+        # img_loss_x0_all.append(img_loss_x0_index)
+        # decode_loss_all.append(decode_loss_index)
     # region plotting
     # import matplotlib.pyplot as plt
     # fig, ax = plt.subplots(figsize=(8,10))
@@ -538,7 +734,6 @@ def main_run(conf,
     # fig.savefig('../runs/imgs/img_t0_loss.png')
     # tb_writer.add_figure('LossCurve/img_t0', fig, 0)
     # endregion
-    # tb_writer.flush()
     return 0
     
 

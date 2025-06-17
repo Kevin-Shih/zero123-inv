@@ -4,19 +4,19 @@ model:
   model_config: "configs/sd-objaverse-finetune-c_concat-256.yaml"
   ckpt: "../105000.ckpt"
   n_samples: 1
-  loss_type: "BluredMaskImgX0" # for logging
+  loss_type: "idp_pair_loss" # for logging
   loss_amp: 1
-  lr: 1e-3
+  lr: 5e-2
   lr_scheduler:
     use: False
     milestones: [200]
     gamma: 0.2
   guide_scale: 3.0
   ddim_eta: 1.0
-  blur_k_ize: 3
-  blur_min: 0.1
-  blur_max: 1.0
-  iters: 200
+  blur_k_ize: 5
+  blur_min: 2.0
+  blur_max: 2.0
+  iters: 100
   clamp: null
 input:
   ref_image: "elev=0_azi=0.png"
@@ -28,7 +28,7 @@ input:
   min_index: null
   input_type: "perfect" # for logging
 group_name: "PerfectInput"
-run_name: "Blur.25_k3_1.15xMaskImgX0_eta1_idx3"
-log_all_img: True
+run_name: "def_Blurk5_2_idp_single_loss"
+log_all_img: False
 log_all_img_freq: 10
 comment: ""

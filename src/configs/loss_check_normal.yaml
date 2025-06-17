@@ -12,10 +12,10 @@ model:
     use: False
     milestones: [200]
     gamma: 0.2
-  guide_scale: 3.0
+  guide_scale: 1.0
   ddim_eta: 1.0
-  blur_k_ize: 3
-  blur_min: 0.5
+  blur_k_size: 5
+  blur_min: 2.0
   blur_max: 2.0
   clamp: null
 input:
@@ -28,8 +28,8 @@ input:
   min_index: null
   input_type: "perfect" # for logging
 group_name: "PerfectInput_normal"
-run_name: "default_blur.5-2_eta1_SampleThenMode"
+run_name: "default_blurk5-2_scale1"
 log_all_img: True
-comment: ""
+comment: "no uc for noise loss"
 check_range: [-45, 45]
 check_step: 1

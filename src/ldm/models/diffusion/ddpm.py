@@ -750,18 +750,18 @@ class LatentDiffusion(DDPM):
         cond = {}
 
         # To support classifier-free guidance, randomly drop out only text conditioning 5%, only image conditioning 5%, and both 5%.
-        random = torch.rand(x.size(0), device=x.device)
-        prompt_mask = rearrange(random < 2 * uncond, "n -> n 1 1")
-        input_mask = 1 - rearrange((random >= uncond).float() * (random < 3 * uncond).float(), "n -> n 1 1 1")
-        null_prompt = self.get_learned_conditioning([""])
+        # random = torch.rand(x.size(0), device=x.device)
+        # prompt_mask = rearrange(random < 2 * uncond, "n -> n 1 1")
+        # input_mask = 1 - rearrange((random >= uncond).float() * (random < 3 * uncond).float(), "n -> n 1 1 1")
+        # null_prompt = self.get_learned_conditioning([""])
 
         # z.shape: [8, 4, 64, 64]; c.shape: [8, 1, 768]
         # print('=========== xc shape ===========', xc.shape)
         with torch.enable_grad():
             clip_emb = self.get_learned_conditioning(xc).detach()
-            null_prompt = self.get_learned_conditioning([""]).detach()
-            cond["c_crossattn"] = [self.cc_projection(torch.cat([torch.where(prompt_mask, null_prompt, clip_emb), T[:, None, :]], dim=-1))]
-        cond["c_concat"] = [input_mask * self.encode_first_stage((xc.to(self.device))).mode().detach()]
+            # null_prompt = self.get_learned_conditioning([""]).detach()
+            cond["c_crossattn"] = [self.cc_projection(torch.cat([clip_emb, T[:, None, :]], dim=-1))]
+        cond["c_concat"] = [self.encode_first_stage((xc.to(self.device))).mode().detach()]
         out = [z, cond]
         if return_first_stage_outputs:
             xrec = self.decode_first_stage(z)
@@ -876,20 +876,25 @@ class LatentDiffusion(DDPM):
         return loss
 
     def forward(self, x, c, *args, **kwargs):
-        t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
-        if self.model.conditioning_key is not None:
-            assert c is not None
-            # if self.cond_stage_trainable:
-            #     c = self.get_learned_conditioning(c)
-            if self.shorten_cond_schedule:  # TODO: drop this option
-                tc = self.cond_ids[t].to(self.device)
-                c = self.q_sample(x_start=c, t=tc, noise=torch.randn_like(c.float()))
+        if 'ts' in kwargs:
+            t = torch.tensor(kwargs['ts']*self.num_timesteps, device=self.device).long()
+            kwargs.pop('ts')
+        else:
+            t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
+        #t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
+        # if self.model.conditioning_key is not None:
+        #     assert c is not None
+        #     # if self.cond_stage_trainable:
+        #     #     c = self.get_learned_conditioning(c)
+        #     if self.shorten_cond_schedule:  # TODO: drop this option
+        #         tc = self.cond_ids[t].to(self.device)
+        #         c = self.q_sample(x_start=c, t=tc, noise=torch.randn_like(c.float()))
         return self.p_losses(x, c, t, *args, **kwargs)
 
     def _rescale_annotations(self, bboxes, crop_coordinates):  # TODO: move to dataset
         def rescale_bbox(bbox):
-            x0 = clamp((bbox[0] - crop_coordinates[0]) / crop_coordinates[2])
-            y0 = clamp((bbox[1] - crop_coordinates[1]) / crop_coordinates[3])
+            x0 = torch.clamp((bbox[0] - crop_coordinates[0]) / crop_coordinates[2])
+            y0 = torch.clamp((bbox[1] - crop_coordinates[1]) / crop_coordinates[3])
             w = min(bbox[2] / crop_coordinates[2], 1 - x0)
             h = min(bbox[3] / crop_coordinates[3], 1 - y0)
             return x0, y0, w, h
@@ -1103,6 +1108,7 @@ class LatentDiffusion(DDPM):
         nonzero_mask = (1 - (t == 0).float()).reshape(b, *((1,) * (len(x.shape) - 1)))
 
         if return_codebook_ids:
+            raise DeprecationWarning("Support dropped.")
             return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise, logits.argmax(dim=1)
         if return_x0:
             return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise, x0

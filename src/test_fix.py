@@ -9,6 +9,7 @@ import numpy as np
 from omegaconf import OmegaConf
 from PIL import Image
 from rich import print
+from einops import rearrange
 from lovely_numpy import lo
 from contextlib import nullcontext
 from tqdm import tqdm
@@ -106,7 +107,7 @@ def sample_model(input_im, target_im, LDModel, precision, h, w,
     sampler = DDIMSampler(LDModel)
     sampler.make_schedule(ddim_num_steps=ddim_steps, ddim_discretize="uniform", ddim_eta=ddim_eta, verbose=False)
     with precision_scope('cuda'):
-        with LDModel.ema_scope():
+        # with LDModel.ema_scope():
             # region input/condition
             # Set time step and noisy latent shape
             t = torch.full((n_samples,), step, device=input_im.device, dtype=torch.long)
@@ -120,11 +121,11 @@ def sample_model(input_im, target_im, LDModel, precision, h, w,
             _noise = torch.randn_like(input_im_z)
             input_latent = LDModel.q_sample(target_im_z.clone().detach(), t, _noise) # perfecInput
             # input_latent = LDModel.q_sample(input_im_z, t, _noise) # fix input
-            _target_start_latent = LDModel.q_sample(target_im_z.clone().detach(), t, _noise)
+            # _target_start_latent = LDModel.q_sample(target_im_z.clone().detach(), t, _noise)
             target_latent = LDModel.q_sample(target_im_z, t-step_target_inter, _noise)
 
-            latent_diff = _target_start_latent - target_latent
-            latent_x0_diff = _target_start_latent - target_im_z
+            # latent_diff = _target_start_latent - target_latent
+            # latent_x0_diff = _target_start_latent - target_im_z
             # Get condintioning
             img_cond = LDModel.get_learned_conditioning(input_im).tile(n_samples, 1, 1)
             T = torch.cat([elevation, torch.sin(azimuth), torch.cos(azimuth), radius])
@@ -162,7 +163,54 @@ def sample_model(input_im, target_im, LDModel, precision, h, w,
             dir_xt = (1. - a_prev - sigma_t**2).sqrt() * e_t # direction pointing to x_t
             pred_x_idx_minus_one = a_prev.sqrt() * pred_x0 + dir_xt + sigma_t * _noise
 
-            return pred_x_idx_minus_one, pred_x0, input_latent, target_latent, target_im_z, latent_diff, latent_x0_diff
+            return pred_x_idx_minus_one, pred_x0, input_latent, target_latent, target_im_z
+
+class PoseT(torch.nn.Module):
+    
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self, pose):
+
+        p1 = pose[..., 0:1]
+        p2 = torch.sin(pose[..., 1:2])
+        p3 = torch.cos(pose[..., 1:2])
+        p4 = pose[..., 2:3]
+
+        return torch.cat([p1, p2, p3, p4], dim=-1)
+
+def idp_noise_loss(model, cond_image, target_image, pose, ts_range, bsz, noise=None):
+
+    mx = ts_range[1]
+    mn = ts_range[0]
+
+    pose_layer = PoseT()
+
+    batch = {}
+    batch['image_target'] = target_image.repeat(bsz, 1, 1, 1)
+    batch['image_cond'] = cond_image.repeat(bsz, 1, 1, 1)
+    batch['T'] = pose_layer(pose.detach()).repeat(bsz, 1)
+
+    if noise is not None:
+        noise = torch.tensor(noise, dtype=model.dtype, device=model.device)
+    else:
+        noise = torch.randn(bsz, 4, 32, 32, device=model.device)
+    loss, _ = model.shared_step(batch, ts=np.arange(mn, mx, (mx-mn) / bsz), noise=noise[:bsz])
+
+    return loss
+
+
+def idp_pairwise_loss(pose, model, cond_image, target_image, ts_range, probe_bsz, noise=None):
+
+    theta, azimuth, radius = pose
+
+    pose1 = torch.tensor([[theta, azimuth, radius]], device=model.device, dtype=torch.float32)
+    pose2 = torch.tensor([[-theta, np.pi*2-azimuth, -radius]], device=model.device, dtype=torch.float32)
+    loss1 = idp_noise_loss(model, cond_image, target_image, pose1, ts_range, probe_bsz, noise=noise)
+    loss2 = idp_noise_loss(model, target_image, cond_image, pose2, ts_range, probe_bsz, noise=noise)
+
+    return loss1 + loss2
+
 
 def main_run(conf,
              input_im, target_im,
@@ -238,62 +286,74 @@ def main_run(conf,
             index = np.random.randint(min_index, 10)
         """
         index = int(max_index - iter//idx_decrease_interval)
-        pred_target, pred_x0, input_latent, target_latent, target_latent_x0,\
-        latent_diff, latent_x0_diff  = sample_model(input_im, target_im, LDModel, precision,
+        pred_target, pred_x0, input_latent, target_latent, target_latent_x0 = sample_model(input_im, target_im, LDModel, precision,
                                                     h, w, est_elev, est_azimuth, est_radius, n_samples= n_samples, scale= scale,
                                                     ddim_steps= ddim_steps, ddim_eta= ddim_eta, index= index)
+        
+        # idp_pose=torch.cat([est_elev, est_azimuth, est_radius], dim =-1).to(device)
+        # idp_single_loss = idp_noise_loss(LDModel, raw_input_im, raw_target_im, idp_pose,
+        #                                 ts_range=[0.2, 0.21], bsz=1, noise=None)
+        # idp_pair_loss = idp_pairwise_loss(idp_pose, LDModel, rearrange(target_im,'b c h w -> b h w c'), rearrange(input_im,'b c h w -> b h w c'), ts_range=[0.2, 0.21], probe_bsz=1, noise=None)
+        batch = {}
+        bsz = 1
+        raw_input_im = rearrange(input_im,'b c h w -> b h w c')
+        raw_target_im = rearrange(target_im,'b c h w -> b h w c')
+        batch['image_target'] = raw_target_im.repeat(bsz, 1, 1, 1)
+        batch['image_cond'] = raw_input_im.repeat(bsz, 1, 1, 1)
+        batch['T'] = torch.cat([est_elev, torch.sin(est_azimuth), torch.cos(est_azimuth), est_radius]).repeat(bsz, 1)
+        idp_single_loss, _ = LDModel.shared_step(batch, ts=np.arange(0.2, 0.21, (0.01) / bsz), noise=torch.randn(bsz, 4, 32, 32, device=LDModel.device)[:bsz])
+        
         decode_pred_target   = LDModel.decode_first_stage(pred_target)
         decode_pred_x0       = LDModel.decode_first_stage(pred_x0)
-        decode_target_latent = LDModel.decode_first_stage(target_latent)
+        # decode_target_latent = LDModel.decode_first_stage(target_latent)
 
         if conf.model.clamp is not None:
             print(f'clamping output: {conf.model.clamp}')
             if conf.model.clamp == 'normal':
                 decode_pred_target   = torch.clamp((decode_pred_target   + 1.0) / 2.0, min=0.0, max=1.0)
-                decode_target_latent = torch.clamp((decode_target_latent + 1.0) / 2.0, min=0.0, max=1.0)
+                # decode_target_latent = torch.clamp((decode_target_latent + 1.0) / 2.0, min=0.0, max=1.0)
                 decode_pred_x0       = torch.clamp((decode_pred_x0       + 1.0) / 2.0, min=0.0, max=1.0)
             elif conf.model.clamp == 'ddim':
                 decode_pred_target   = torch.clamp(decode_pred_target  , min=-1.0, max=1.0)
-                decode_target_latent = torch.clamp(decode_target_latent, min=-1.0, max=1.0)
+                # decode_target_latent = torch.clamp(decode_target_latent, min=-1.0, max=1.0)
                 decode_pred_x0       = torch.clamp(decode_pred_x0      , min=-1.0, max=1.0)
 
-        pred_latent_diff    = input_latent - pred_target
-        pred_latent_x0_diff = input_latent - pred_x0
-        noise_loss          = nn.functional.mse_loss(pred_latent_diff, latent_diff) # loss between latent_diff and denoised diff
-        noise_x0_loss       = nn.functional.mse_loss(pred_latent_x0_diff, latent_x0_diff) # loss between latent_x0_diff and denoised x0 diff
+        # pred_latent_diff    = input_latent - pred_target
+        # pred_latent_x0_diff = input_latent - pred_x0
+        # noise_loss          = nn.functional.mse_loss(pred_latent_diff, latent_diff) # loss between latent_diff and denoised diff
+        # noise_x0_loss       = nn.functional.mse_loss(pred_latent_x0_diff, latent_x0_diff) # loss between latent_x0_diff and denoised x0 diff
 
         blur = transforms.GaussianBlur(kernel_size=[conf.model.blur_k_ize], sigma = (conf.model.blur_min, conf.model.blur_max))
         blur_decode_pred_target     = blur(decode_pred_target)
         blur_decode_pred_x0         = blur(decode_pred_x0)
-        blur_decode_target_latent   = blur(decode_target_latent)
+        # blur_decode_target_latent   = blur(decode_target_latent)
         blur_target_im              = blur(target_im)
         
         mask_blur_decode_pred_target     = blur_decode_pred_target   * target_mask.float()
         mask_blur_decode_pred_x0         = blur_decode_pred_x0       * target_mask.float()
-        mask_blur_decode_target_latent   = blur_decode_target_latent * target_mask.float()
+        # mask_blur_decode_target_latent   = blur_decode_target_latent * target_mask.float()
         mask_blur_target_im              = blur_target_im            * target_mask.float()
 
         latent_loss    = nn.functional.mse_loss(pred_target, target_latent)
         latent_x0_loss = nn.functional.mse_loss(pred_x0, target_latent_x0.expand_as(pred_x0))
-        img_loss       = nn.functional.mse_loss(decode_pred_target, decode_target_latent)
-        img_x0_loss    = nn.functional.mse_loss(decode_pred_x0, target_im.expand_as(blur_decode_pred_x0))
-        blur_img_loss       = nn.functional.mse_loss(blur_decode_pred_target, blur_decode_target_latent)
+        # img_loss       = nn.functional.mse_loss(decode_pred_target, decode_target_latent)
+        # img_x0_loss    = nn.functional.mse_loss(decode_pred_x0, target_im.expand_as(blur_decode_pred_x0))
+        # blur_img_loss       = nn.functional.mse_loss(blur_decode_pred_target, blur_decode_target_latent)
         blur_img_x0_loss    = nn.functional.mse_loss(blur_decode_pred_x0, blur_target_im.expand_as(blur_decode_pred_x0))
 
         no_reduct_mse = nn.MSELoss(reduction='none')
         non_zero_elements = target_mask.sum()
-        _mask_img_loss = (no_reduct_mse(decode_pred_target, decode_target_latent) * target_mask.float()).sum()
-        mask_img_loss = _mask_img_loss / non_zero_elements
-        _mask_img_x0_loss = (no_reduct_mse(decode_pred_x0, target_im.expand_as(decode_pred_x0)) * target_mask.float()).sum()
-        mask_img_x0_loss = _mask_img_x0_loss / non_zero_elements
+        # _mask_img_loss = (no_reduct_mse(decode_pred_target, decode_target_latent) * target_mask.float()).sum()
+        # mask_img_loss = _mask_img_loss / non_zero_elements
+        # _mask_img_x0_loss = (no_reduct_mse(decode_pred_x0, target_im.expand_as(decode_pred_x0)) * target_mask.float()).sum()
+        # mask_img_x0_loss = _mask_img_x0_loss / non_zero_elements
         
-        _blur_mask_img_loss = (no_reduct_mse(blur_decode_pred_target, blur_decode_target_latent) * target_mask.float()).sum()
-        blur_mask_img_loss = _blur_mask_img_loss / non_zero_elements
+        # _blur_mask_img_loss = (no_reduct_mse(blur_decode_pred_target, blur_decode_target_latent) * target_mask.float()).sum()
+        # blur_mask_img_loss = _blur_mask_img_loss / non_zero_elements
         _blur_mask_img_x0_loss = (no_reduct_mse(blur_decode_pred_x0, blur_target_im.expand_as(blur_decode_pred_x0)) * target_mask.float()).sum()
         blur_mask_img_x0_loss = _blur_mask_img_x0_loss / non_zero_elements
 
-        neg_latent_x0_loss = -1.0 * latent_x0_loss
-        loss = blur_mask_img_x0_loss.clone()
+        loss = idp_single_loss
         if conf.model.loss_amp:
             loss = loss * conf.model.loss_amp
         loss.backward()
@@ -344,29 +404,31 @@ def main_run(conf,
                 'Error/Abs azimuth':            np.abs(err[1]),
                 'Log/ddim_index':               index,
                 'Loss/total':                   loss.item(),
-                'Loss/img':                     img_loss.item(),
-                'Loss/img_x0':                  img_x0_loss.item(),
-                'Loss/mask_img':                mask_img_loss.item(),
-                'Loss/mask_img_x0':             mask_img_x0_loss.item(),
-                'Loss/blur_img':                blur_img_loss.item(),
+                # 'Loss/img':                     img_loss.item(),
+                # 'Loss/img_x0':                  img_x0_loss.item(),
+                # 'Loss/mask_img':                mask_img_loss.item(),
+                # 'Loss/mask_img_x0':             mask_img_x0_loss.item(),
+                # 'Loss/blur_img':                blur_img_loss.item(),
                 'Loss/blur_img_x0':             blur_img_x0_loss.item(),
-                'Loss/blur_mask_img':           blur_mask_img_loss.item(),
+                # 'Loss/blur_mask_img':           blur_mask_img_loss.item(),
                 'Loss/blur_mask_img_x0':        blur_mask_img_x0_loss.item(),
-                'Loss/noise_loss':              noise_loss.item(),
-                'Loss/noise_x0_loss':           noise_x0_loss.item(),
+                # 'Loss/noise_loss':              noise_loss.item(),
+                # 'Loss/noise_x0_loss':           noise_x0_loss.item(),
                 'Loss/latent':                  latent_loss.item(),
                 'Loss/latent_x0':               latent_x0_loss.item(),
-                'Loss/neg_latent_x0':           neg_latent_x0_loss.item(),
-                'Image/blured_target_im':           wandb.Image(blur_target_im[0]                   , caption=f"blured_target_im"),
+                # 'Loss/neg_latent_x0':           -1*latent_x0_loss.item(),
+                'Loss/idp_single_loss':         idp_single_loss,
+                # 'Loss/idp_pair_loss':           idp_pair_loss,
+                # 'Image/blured_target_im':           wandb.Image(blur_target_im[0]                   , caption=f"blured_target_im"),
                 'Image/blured_mask_target_im':      wandb.Image(mask_blur_target_im[0]              , caption=f"blur_mask_target_im"),
                 'Image/pred_target':                wandb.Image(decode_pred_target[0]               , caption=f"generated_pred_target"),
-                'Image/target_latent':              wandb.Image(decode_target_latent[0]             , caption=f"generated_target_latent"),
+                # 'Image/target_latent':              wandb.Image(decode_target_latent[0]             , caption=f"generated_target_latent"),
                 'Image/pred_x0':                    wandb.Image(decode_pred_x0[0]                   , caption=f"generated_pred_x0"),
                 'Image/blured_pred_target':         wandb.Image(blur_decode_pred_target[0]          , caption=f"blured_pred_target"),
-                'Image/blured_target_latent':       wandb.Image(blur_decode_target_latent[0]        , caption=f"blured_target_latent"),
+                # 'Image/blured_target_latent':       wandb.Image(blur_decode_target_latent[0]        , caption=f"blured_target_latent"),
                 'Image/blured_pred_x0':             wandb.Image(blur_decode_pred_x0[0]              , caption=f"blured_pred_x0"),
                 'Image/blured_mask_pred_target':    wandb.Image(mask_blur_decode_pred_target[0]     , caption=f"blur_mask_decode_pred_target"),
-                'Image/blured_mask_target_latent':  wandb.Image(mask_blur_decode_target_latent[0]   , caption=f"blur_mask_decode_target_latent"),
+                # 'Image/blured_mask_target_latent':  wandb.Image(mask_blur_decode_target_latent[0]   , caption=f"blur_mask_decode_target_latent"),
                 'Image/blured_mask_pred_x0':        wandb.Image(mask_blur_decode_pred_x0[0]         , caption=f"blur_mask_decode_pred_x0"),
             }, step=iter)
     return 0
