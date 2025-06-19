@@ -165,53 +165,6 @@ def sample_model(input_im, target_im, LDModel, precision, h, w,
 
             return pred_x_idx_minus_one, pred_x0, input_latent, target_latent, target_im_z
 
-class PoseT(torch.nn.Module):
-    
-    def __init__(self):
-        super().__init__()
-    
-    def forward(self, pose):
-
-        p1 = pose[..., 0:1]
-        p2 = torch.sin(pose[..., 1:2])
-        p3 = torch.cos(pose[..., 1:2])
-        p4 = pose[..., 2:3]
-
-        return torch.cat([p1, p2, p3, p4], dim=-1)
-
-def idp_noise_loss(model, cond_image, target_image, pose, ts_range, bsz, noise=None):
-
-    mx = ts_range[1]
-    mn = ts_range[0]
-
-    pose_layer = PoseT()
-
-    batch = {}
-    batch['image_target'] = target_image.repeat(bsz, 1, 1, 1)
-    batch['image_cond'] = cond_image.repeat(bsz, 1, 1, 1)
-    batch['T'] = pose_layer(pose.detach()).repeat(bsz, 1)
-
-    if noise is not None:
-        noise = torch.tensor(noise, dtype=model.dtype, device=model.device)
-    else:
-        noise = torch.randn(bsz, 4, 32, 32, device=model.device)
-    loss, _ = model.shared_step(batch, ts=np.arange(mn, mx, (mx-mn) / bsz), noise=noise[:bsz])
-
-    return loss
-
-
-def idp_pairwise_loss(pose, model, cond_image, target_image, ts_range, probe_bsz, noise=None):
-
-    theta, azimuth, radius = pose
-
-    pose1 = torch.tensor([[theta, azimuth, radius]], device=model.device, dtype=torch.float32)
-    pose2 = torch.tensor([[-theta, np.pi*2-azimuth, -radius]], device=model.device, dtype=torch.float32)
-    loss1 = idp_noise_loss(model, cond_image, target_image, pose1, ts_range, probe_bsz, noise=noise)
-    loss2 = idp_noise_loss(model, target_image, cond_image, pose2, ts_range, probe_bsz, noise=noise)
-
-    return loss1 + loss2
-
-
 def main_run(conf,
              input_im, target_im,
              models, device,
@@ -289,20 +242,7 @@ def main_run(conf,
         pred_target, pred_x0, input_latent, target_latent, target_latent_x0 = sample_model(input_im, target_im, LDModel, precision,
                                                     h, w, est_elev, est_azimuth, est_radius, n_samples= n_samples, scale= scale,
                                                     ddim_steps= ddim_steps, ddim_eta= ddim_eta, index= index)
-        
-        # idp_pose=torch.cat([est_elev, est_azimuth, est_radius], dim =-1).to(device)
-        # idp_single_loss = idp_noise_loss(LDModel, raw_input_im, raw_target_im, idp_pose,
-        #                                 ts_range=[0.2, 0.21], bsz=1, noise=None)
-        # idp_pair_loss = idp_pairwise_loss(idp_pose, LDModel, rearrange(target_im,'b c h w -> b h w c'), rearrange(input_im,'b c h w -> b h w c'), ts_range=[0.2, 0.21], probe_bsz=1, noise=None)
-        batch = {}
-        bsz = 1
-        raw_input_im = rearrange(input_im,'b c h w -> b h w c')
-        raw_target_im = rearrange(target_im,'b c h w -> b h w c')
-        batch['image_target'] = raw_target_im.repeat(bsz, 1, 1, 1)
-        batch['image_cond'] = raw_input_im.repeat(bsz, 1, 1, 1)
-        batch['T'] = torch.cat([est_elev, torch.sin(est_azimuth), torch.cos(est_azimuth), est_radius]).repeat(bsz, 1)
-        idp_single_loss, _ = LDModel.shared_step(batch, ts=np.arange(0.2, 0.21, (0.01) / bsz), noise=torch.randn(bsz, 4, 32, 32, device=LDModel.device)[:bsz])
-        
+               
         decode_pred_target   = LDModel.decode_first_stage(pred_target)
         decode_pred_x0       = LDModel.decode_first_stage(pred_x0)
         # decode_target_latent = LDModel.decode_first_stage(target_latent)
@@ -353,7 +293,7 @@ def main_run(conf,
         _blur_mask_img_x0_loss = (no_reduct_mse(blur_decode_pred_x0, blur_target_im.expand_as(blur_decode_pred_x0)) * target_mask.float()).sum()
         blur_mask_img_x0_loss = _blur_mask_img_x0_loss / non_zero_elements
 
-        loss = idp_single_loss
+        loss = blur_mask_img_x0_loss
         if conf.model.loss_amp:
             loss = loss * conf.model.loss_amp
         loss.backward()
@@ -417,8 +357,6 @@ def main_run(conf,
                 'Loss/latent':                  latent_loss.item(),
                 'Loss/latent_x0':               latent_x0_loss.item(),
                 # 'Loss/neg_latent_x0':           -1*latent_x0_loss.item(),
-                'Loss/idp_single_loss':         idp_single_loss,
-                # 'Loss/idp_pair_loss':           idp_pair_loss,
                 # 'Image/blured_target_im':           wandb.Image(blur_target_im[0]                   , caption=f"blured_target_im"),
                 'Image/blured_mask_target_im':      wandb.Image(mask_blur_target_im[0]              , caption=f"blur_mask_target_im"),
                 'Image/pred_target':                wandb.Image(decode_pred_target[0]               , caption=f"generated_pred_target"),
