@@ -18,6 +18,18 @@ import cv2
 from carvekit.api.high import HiInterface
 import PIL
 
+def calculate_param_ddim(sampler, index, n_samples, device):
+    alphas = sampler.ddim_alphas
+    alphas_prev = sampler.ddim_alphas_prev
+    sigmas = sampler.ddim_sigmas
+    sqrt_one_minus_alphas = sampler.ddim_sqrt_one_minus_alphas
+    # select parameters corresponding to the currently considered timestep
+    a_t = torch.full((n_samples, 1, 1, 1), alphas[index], device=device)
+    a_prev = torch.full((n_samples, 1, 1, 1), alphas_prev[index], device=device)
+    sigma_t = torch.full((n_samples, 1, 1, 1), sigmas[index], device=device)
+    sqrt_one_minus_at = torch.full((n_samples, 1, 1, 1), sqrt_one_minus_alphas[index],device=device)
+    return a_t, a_prev, sigma_t, sqrt_one_minus_at
+
 def pil_rectangle_crop(im):
     width, height = im.size   # Get dimensions
     

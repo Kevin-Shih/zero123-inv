@@ -16,7 +16,7 @@ model:
   ddim_eta: 1.0
   blur_k_size: 9
   blur_min: null
-  blur_max: 3.5
+  blur_max: 3
   clamp: null
 input:
   ref_image: "elev=0_azi=0.png"
@@ -24,12 +24,12 @@ input:
   rel_elev: 0.0
   rel_azi: 0.0
   rel_radius: 0.0
-  max_index: 25
+  max_index: 3
   min_index: null
   input_type: "perfect" # for logging
 group_name: "PerfectInput_normal"
-run_name: "xl_blurk9-3.5_scale1_idx25"
+run_name: "xl_blurk9-3_scale1_idx3"
 log_all_img: True
-comment: "no uc for noise loss, add logvar, idx25"
+comment: "no uc for noise loss, add logvar"
 check_range: [-45, 45]
 check_step: 1
