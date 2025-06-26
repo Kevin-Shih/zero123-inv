@@ -31,6 +31,6 @@ group_name: "PerfectInput_normal"
 run_name: "xl_blurk9-3_scale1_idx3"
 log_all_img: True
 comment: "no uc for noise loss, add logvar"
-check_type: "elev"
-check_range: [-45, 45]
+check_elev_range: [-20, 20]
+check_azi_range: [-30, 30]
 check_step: 1

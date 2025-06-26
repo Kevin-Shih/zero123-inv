@@ -149,7 +149,11 @@ def sample_model(input_im, target_im, LDModel, precision, h, w,
             dir_xt = (1. - a_prev - sigma_t**2).sqrt() * e_t # direction pointing to x_t
             pred_x_idx_minus_one = a_prev.sqrt() * pred_x0 + dir_xt + sigma_t * _noise
 
-            return pred_x_idx_minus_one, pred_x0, input_latent, target_latent, target_im_z
+            noise_loss = torch.nn.functional.mse_loss(LDModel.apply_model(input_latent, t, cond), _noise, reduction='none').mean([1, 2, 3])
+            logvar_t = LDModel.logvar[t].to(LDModel.device)
+            noise_loss = noise_loss / torch.exp(logvar_t) + logvar_t
+
+            return pred_x_idx_minus_one, pred_x0, input_latent, target_latent, target_im_z, noise_loss.mean()
 
 def main_run(conf,
              input_im, target_im,
@@ -192,7 +196,6 @@ def main_run(conf,
     """
 
     LDModel = models['turncam']
-
     # used_x = -x  # NOTE: Polar makes more sense in Basile's opinion this way!
     # used_elevation = elevation  # NOTE: Set this way for consistency.
     est_elev = Parameter(data=Tensor([start_elevation]).to(torch.float32).to(device), requires_grad=True)
@@ -200,9 +203,9 @@ def main_run(conf,
     est_radius = Parameter(data=Tensor([start_radius]).to(torch.float32).to(device), requires_grad=True)
 
     print("learning_rate = ", learning_rate)
-    # optimizer = optim.Adam([{'params': est_elev},
-    #                         {'params': est_azimuth}], lr=learning_rate)#{'params': est_radius, 'lr': 1e-18}
-    optimizer = optim.Adam([{'params': est_azimuth, 'param_names': 'azi'}], lr=learning_rate)
+    optimizer = optim.Adam([{'params': est_elev, 'param_names': 'elev'},
+                            {'params': est_azimuth, 'param_names': 'azi'}], lr=learning_rate)
+    # optimizer = optim.Adam([{'params': est_azimuth, 'param_names': 'azi'}], lr=learning_rate)#{'params': est_radius, 'lr': 1e-18}
 
     # scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=conf.model.lr_scheduler.milestones,
     #                                            gamma=conf.model.lr_scheduler.gamma)
@@ -225,13 +228,13 @@ def main_run(conf,
             index = np.random.randint(min_index, 10)
         """
         index = int(max_index - iter//idx_decrease_interval)
-        pred_target, pred_x0, input_latent, target_latent, target_latent_x0 = sample_model(input_im, target_im, LDModel, precision,
+        pred_target, pred_x0, input_latent, target_latent, target_latent_x0, noise_loss = sample_model(input_im, target_im, LDModel, precision,
                                                     h, w, est_elev, est_azimuth, est_radius, n_samples= n_samples, scale= scale,
                                                     ddim_steps= ddim_steps, ddim_eta= ddim_eta, index= index)
                
-        decode_pred_target   = LDModel.decode_first_stage(pred_target)
+        # decode_pred_target   = LDModel.decode_first_stage(pred_target)
         decode_pred_x0       = LDModel.decode_first_stage(pred_x0)
-        decode_target_latent = LDModel.decode_first_stage(target_latent)
+        # decode_target_latent = LDModel.decode_first_stage(target_latent)
 
         if conf.model.clamp is not None:
             print(f'clamping output: {conf.model.clamp}')
@@ -250,9 +253,9 @@ def main_run(conf,
         # latent_diff_x0_loss       = nn.functional.mse_loss(pred_latent_x0_diff, latent_x0_diff) # loss between latent_x0_diff and denoised x0 diff
 
         blur = transforms.GaussianBlur(kernel_size=[conf.model.blur_k_size], sigma = (conf.model.blur_min if conf.model.blur_min else conf.model.blur_max, conf.model.blur_max))
-        blur_decode_pred_target     = blur(decode_pred_target)
+        # blur_decode_pred_target     = blur(decode_pred_target)
         blur_decode_pred_x0         = blur(decode_pred_x0)
-        blur_decode_target_latent   = blur(decode_target_latent)
+        # blur_decode_target_latent   = blur(decode_target_latent)
         blur_target_im              = blur(target_im)
 
         latent_loss    = nn.functional.mse_loss(pred_target, target_latent)
@@ -269,8 +272,8 @@ def main_run(conf,
         # _mask_img_x0_loss = (no_reduct_mse(decode_pred_x0, target_im.expand_as(decode_pred_x0)) * target_mask.float()).sum()
         # mask_img_x0_loss = _mask_img_x0_loss / non_zero_elements
         
-        _blur_mask_img_loss = (no_reduct_mse(blur_decode_pred_target, blur_decode_target_latent) * target_mask.float()).sum()
-        blur_mask_img_loss = _blur_mask_img_loss / non_zero_elements
+        # _blur_mask_img_loss = (no_reduct_mse(blur_decode_pred_target, blur_decode_target_latent) * target_mask.float()).sum()
+        # blur_mask_img_loss = _blur_mask_img_loss / non_zero_elements
         _blur_mask_img_x0_loss = (no_reduct_mse(blur_decode_pred_x0, blur_target_im.expand_as(blur_decode_pred_x0)) * target_mask.float()).sum()
         blur_mask_img_x0_loss = _blur_mask_img_x0_loss / non_zero_elements
 
@@ -331,18 +334,19 @@ def main_run(conf,
                 # 'Loss/mask_img_x0':             mask_img_x0_loss.item(),
                 # 'Loss/blur_img':                blur_img_loss.item(),
                 # 'Loss/blur_img_x0':             blur_img_x0_loss.item(),
-                'Loss/blur_mask_img':           blur_mask_img_loss.item(),
+                # 'Loss/blur_mask_img':           blur_mask_img_loss.item(),
                 'Loss/blur_mask_img_x0':        blur_mask_img_x0_loss.item(),
                 # 'Loss/latent_diff_loss':        latent_diff_loss.item(),
                 # 'Loss/latent_diff_x0_loss':     latent_diff_x0_loss.item(),
                 'Loss/latent':                  latent_loss.item(),
                 'Loss/latent_x0':               latent_x0_loss.item(),
+                'Loss/noise':                   noise_loss.item(),
                 'Image/blured_mask_target_im':      wandb.Image(torch.clamp((blur_target_im[0]          + 1.0) / 2.0, min=0.0, max=1.0) * target_mask.float(), caption=f"blur_mask_target_im"),
-                'Image/pred_target':                wandb.Image(decode_pred_target[0]               , caption=f"generated_pred_target"),
-                'Image/target_latent':              wandb.Image(decode_target_latent[0]             , caption=f"generated_target_latent"),
+                # 'Image/pred_target':                wandb.Image(decode_pred_target[0]               , caption=f"generated_pred_target"),
+                # 'Image/target_latent':              wandb.Image(decode_target_latent[0]             , caption=f"generated_target_latent"),
                 'Image/pred_x0':                    wandb.Image(decode_pred_x0[0]                   , caption=f"generated_pred_x0"),
-                'Image/blured_mask_pred_target':    wandb.Image(torch.clamp((blur_decode_pred_target[0] + 1.0) / 2.0, min=0.0, max=1.0) * target_mask.float(), caption=f"blur_mask_decode_pred_target"),
-                'Image/blured_mask_target_latent':  wandb.Image(torch.clamp((blur_decode_target_latent[0] + 1.0) / 2.0, min=0.0, max=1.0) * target_mask.float(), caption=f"blur_mask_decode_target_latent"),
+                # 'Image/blured_mask_pred_target':    wandb.Image(torch.clamp((blur_decode_pred_target[0] + 1.0) / 2.0, min=0.0, max=1.0) * target_mask.float(), caption=f"blur_mask_decode_pred_target"),
+                # 'Image/blured_mask_target_latent':  wandb.Image(torch.clamp((blur_decode_target_latent[0] + 1.0) / 2.0, min=0.0, max=1.0) * target_mask.float(), caption=f"blur_mask_decode_target_latent"),
                 'Image/blured_mask_pred_x0':        wandb.Image(torch.clamp((blur_decode_pred_x0[0]     + 1.0) / 2.0, min=0.0, max=1.0) * target_mask.float(), caption=f"blur_mask_decode_pred_x0"),
             }, step=iter)
     return 0
@@ -382,6 +386,14 @@ if __name__ == '__main__':
     match1 = re.search(r"elev=(-?[\d.]+)_azi=(-?[\d.]+)", ref_image_path)
     match2 = re.search(r"elev=(-?[\d.]+)_azi=(-?[\d.]+)", target_image_path)
     if match1 and match2:
+        gt_elev_deg = float(match2.group(1)) - float(match1.group(1))
+        gt_azi_deg = float(match2.group(2)) - float(match1.group(2))
+        if gt_azi_deg > 180:
+            gt_azi_deg -= 360
+        print(f"start_rel: elev= {rel_elev_deg}, azi= {rel_azi_deg} | gt_rel: elev= {gt_elev_deg}, azi= {gt_azi_deg}")
+    else:
+        match1 = re.search(r"(-?[\d.]+)_(-?[\d.]+)", ref_image_path)
+        match2 = re.search(r"(-?[\d.]+)_(-?[\d.]+)", target_image_path)
         gt_elev_deg = float(match2.group(1)) - float(match1.group(1))
         gt_azi_deg = float(match2.group(2)) - float(match1.group(2))
         if gt_azi_deg > 180:

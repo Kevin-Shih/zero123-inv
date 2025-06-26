@@ -422,7 +422,6 @@ def main_run(conf,
 
     # used_x = -x  # NOTE: Polar makes more sense in Basile's opinion this way!
     # used_elevation = elevation  # NOTE: Set this way for consistency.
-    start_elevation = Tensor([start_elevation]).to(torch.float32).to(device)
     start_radius = Tensor([start_radius]).to(torch.float32).to(device)
     latent_loss_all = []
     latent_x0_loss_all = []
@@ -430,14 +429,16 @@ def main_run(conf,
     img_loss_x0_all = []
     decode_loss_all = []
     
-    lower_bound = int(conf.check_range[0]*10)
-    upper_bound = int(conf.check_range[1]*10)+1
-    # print(f'lower_bound= {lower_bound}, upper_bound= {upper_bound}')
-    azi_list = np.array([x for x in range(lower_bound, upper_bound, conf.check_step)]) / 10.0  + np.round(np.rad2deg(gt_azimuth),0) # all
-    # azi_list = np.array([x for x in range(-1200, 1201, 5)]) / 10.0  + np.round(np.rad2deg(gt_azimuth),0) # wider
-    # azi_list = np.array([x for x in range(-900, 901, 1)]) / 10.0  + np.round(np.rad2deg(gt_azimuth),0)   # wide
-    # azi_list = np.array([x for x in range(-450, 451, 1)]) / 10.0  + np.round(np.rad2deg(gt_azimuth),0)   # normal
+    lower_bound = int(conf.check_elev_range[0]*10)
+    upper_bound = int(conf.check_elev_range[1]*10)+1
+    elev_list = np.array([x for x in range(lower_bound, upper_bound, conf.check_step)]) / 10.0  + np.round(np.rad2deg(gt_azimuth),0)
+    start_elev = Tensor(np.deg2rad(elev_list)).to(torch.float32).to(device)
+    lower_bound = int(conf.check_azi_range[0]*10)
+    upper_bound = int(conf.check_azi_range[1]*10)+1
+    azi_list = np.array([x for x in range(lower_bound, upper_bound, conf.check_step)]) / 10.0  + np.round(np.rad2deg(gt_azimuth),0)
     start_azimuth = Tensor(np.deg2rad(azi_list)).to(torch.float32).to(device)
+    start_azimuth = Tensor(np.deg2rad(azi_list)).to(torch.float32).to(device)
+
     max_iter = len(azi_list)
     max_index = conf.input.max_index
     min_index = max_index if conf.input.min_index is None else max(conf.input.min_index, 0)
@@ -602,23 +603,23 @@ def main_run(conf,
                     # 'Loss/img_x0':              img_x0_loss.item(),
                     'Loss/mask_img':            mask_img_loss.item(),
                     'Loss/mask_img_x0':         mask_img_x0_loss.item(),
-                    'Loss/blur_img':            blur_img_loss.item(),
-                    'Loss/blur_img_x0':         blur_img_x0_loss.item(),
+                    # 'Loss/blur_img':            blur_img_loss.item(),
+                    # 'Loss/blur_img_x0':         blur_img_x0_loss.item(),
                     'Loss/blur_mask_img':       blur_mask_img_loss.item(),
                     'Loss/blur_mask_img_x0':    blur_mask_img_x0_loss.item(),
                     'Loss/latent_diff_loss':    latent_diff_loss.item(),
                     'Loss/latent_diff_x0_loss': latent_diff_x0_loss.item(),
                     'Loss/latent':              latent_loss.item(),
                     'Loss/latent_x0':           latent_x0_loss.item(),
-                    'Loss/neg_latent_x0':       -1 * latent_x0_loss.item(),
+                    # 'Loss/neg_latent_x0':       -1 * latent_x0_loss.item(),
                     'Loss/input_latent':        input_latent_loss.item(),
                     # 'Loss/decode':              decode_loss.item(),
                     'Loss/blur_decode':         blur_decode_loss.item(),
                     'Loss/idp_single_loss':     idp_single_loss,
                     'Loss/idp_pair_loss':       idp_pair_loss,
                     'Loss/noise_loss':          noise_loss.item(),
-                    'Loss/idp_simple_loss':     loss_dict['val/loss_simple'].item(),
-                    'Loss/idp_vlb_loss':        loss_dict['val/loss_vlb'].item(),
+                    # 'Loss/idp_simple_loss':     loss_dict['val/loss_simple'].item(),
+                    # 'Loss/idp_vlb_loss':        loss_dict['val/loss_vlb'].item(),
                 }, step=iter)
                 if iter % 50 == 0:
                     wb_run.log({

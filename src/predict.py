@@ -29,7 +29,7 @@ def load_model_from_config(config, ckpt, device, verbose=False):
     if not isinstance(model, LatentDiffusion):
         raise TypeError("The instantiated model is not of type LatentDiffusion")
     m, u = model.load_state_dict(sd, strict=False)
-    print('model type:', type(model))
+    # print('model type:', type(model))
     if len(m) > 0 and verbose:
         print('missing keys:')
         print(m)
@@ -237,7 +237,7 @@ def predict(device_idx: int = _GPU_INDEX,
 
     cond_image = Image.open(cond_image_path)
     os.makedirs(output_img_name, exist_ok=True)
-    if azimuth_in_degree == 0 and azimuth_step > 0:
+    if float(azimuth_in_degree) == 0 and float(azimuth_step) > 0:
         preds_images = main_run_multi_azimuth(raw_im=cond_image,
                                 models=models, device=device,
                                 elevation=np.deg2rad(elevation_in_degree),
@@ -258,12 +258,13 @@ def predict(device_idx: int = _GPU_INDEX,
 
 if __name__ == '__main__':
     '''
-    python predict.py --ckpt "path_to_ckpt" \
-        --cond_image_path "path_to_cond_image" \
-        --elevation_in_degree 30.0 \
+    python predict.py --device_idx 0 \
+        --ckpt "../zero123-xl.ckpt" \
+        --config "configs/sd-objaverse-finetune-c_concat-256.yaml" \
+        --cond_image_path "data/gso_myrendering/Circo_Fish_Toothbrush_Holder/0_0.png" \
+        --elevation_in_degree 10.0 \
         --azimuth_in_degree 0.0 \
         --radius 1.0 \
-        --azimuth_step 30.0\
-        --output_img_name "path_to_output_image"
+        --output_img_name "test.png"
     '''
     fire.Fire(predict)

@@ -1,4 +1,5 @@
-dataroot: "data/gso_turtle_my_render/"
+# dataroot: "data/gso_turtle_my_render/"
+dataroot: "data/gso_myrendering/Circo_Fish_Toothbrush_Holder"
 model: 
   gpu_idx: 0
   model_config: "configs/sd-objaverse-finetune-c_concat-256.yaml"
@@ -19,16 +20,18 @@ model:
   iters: 500
   clamp: null
 input:
-  ref_image: "elev=0_azi=0.png"
-  target_image: "elev=0_azi=30.png"
+  # ref_image: "elev=0_azi=0.png"
+  # target_image: "elev=0_azi=40.png"
+  ref_image: "0_0.png"
+  target_image: "-20_0.png"
   rel_elev: 0.0
   rel_azi: 0.0
   rel_radius: 0.0
-  max_index: 35
+  max_index: 55
   min_index: null
   input_type: "perfect" # for logging
 group_name: "PerfectInput"
-run_name: "Blurk9_3_idx35_rot"
+run_name: "Blurk9_3_idx55_rot"
 log_all_img: False
 log_all_img_freq: 10
 comment: "xl_Blurk9_3_idx35_BlurMaskImgX0"
