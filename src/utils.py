@@ -168,4 +168,4 @@ def compute_angular_error(pred_rel_sph, gt_rel_sph, radius=0.35):
     tr = (np.trace(R_rel) - 1) / 2
     theta = np.arccos(tr.clip(-1, 1))
 
-    return dist, np.rad2deg(theta)
+    return dist, np.rad2deg(theta), pred_rel_sph[2]

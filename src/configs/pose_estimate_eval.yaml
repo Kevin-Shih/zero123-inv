@@ -1,15 +1,16 @@
-# dataroot: "data/gso_myrendering/Circo_Fish_Toothbrush_Holder_rot"
-dataroot: "data/gso_myrendering/Circo_Fish_Toothbrush_Holder"
+data:
+  dataroot: data
+  dataset_name: GSO
+  obj_idx: 0
 model: 
   gpu_idx: 0
   model_config: "configs/sd-objaverse-finetune-c_concat-256.yaml"
   ckpt: "../zero123-xl.ckpt"
-  # ckpt: "../105000.ckpt"
+args:
   n_samples: 1
   loss_type: "BluredMaskImgX0" # for logging
   lr: 1e-1
   lr_scheduler:
-    use: True
     type: ReduceLROnPlateau
     gamma: 0.7
     patience: 10
@@ -21,10 +22,6 @@ model:
   iters: 100
   clamp: null
 input:
-  # ref_image: "elev=0_azi=0.png"
-  # target_image: "elev=0_azi=40.png"
-  ref_image: "0_0_0.00.png"
-  target_image: "-10_10_0.29.png"
   rel_elev: 0.0
   rel_azi: 0.0
   rel_radius: 0.0

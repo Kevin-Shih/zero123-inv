@@ -1,4 +1,4 @@
-dataroot: "data/gso_turtle_my_render/"
+dataroot: "data/gso_myrendering/Circo_Fish_Toothbrush_Holder_rot"
 model: 
   gpu_idx: 0
   model_config: "configs/sd-objaverse-finetune-c_concat-256.yaml"
@@ -19,18 +19,18 @@ model:
   blur_max: 3
   clamp: null
 input:
-  ref_image: "elev=0_azi=0.png"
-  target_image: "elev=0_azi=10.png"
+  ref_image: "0_0.png"
+  target_image: "-20_0.png"
   rel_elev: 0.0
   rel_azi: 0.0
   rel_radius: 0.0
-  max_index: 3
+  max_index: 35
   min_index: null
   input_type: "perfect" # for logging
 group_name: "PerfectInput_normal"
-run_name: "xl_blurk9-3_scale1_idx3"
+run_name: "idx35_elev"
 log_all_img: True
-comment: "no uc for noise loss, add logvar"
+comment: "no uc for noise loss, add logvar, scale1"
 check_type: "elev"
-check_range: [-45, 45]
+check_range: [-30, 30]
 check_step: 1

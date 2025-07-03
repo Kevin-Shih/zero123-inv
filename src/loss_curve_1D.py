@@ -423,6 +423,7 @@ def main_run(conf,
     # used_x = -x  # NOTE: Polar makes more sense in Basile's opinion this way!
     # used_elevation = elevation  # NOTE: Set this way for consistency.
     start_elevation = Tensor([start_elevation]).to(torch.float32).to(device)
+    start_azimuth = Tensor([start_elevation]).to(torch.float32).to(device)
     start_radius = Tensor([start_radius]).to(torch.float32).to(device)
     latent_loss_all = []
     latent_x0_loss_all = []
@@ -434,12 +435,14 @@ def main_run(conf,
     upper_bound = int(conf.check_range[1]*10)+1
     # print(f'lower_bound= {lower_bound}, upper_bound= {upper_bound}')
     if conf.check_type == 'elev':
-        elev_list = np.array([x for x in range(lower_bound, upper_bound, conf.check_step)]) / 10.0  + np.round(np.rad2deg(gt_azimuth),0) # all
-        start_elev = Tensor(np.deg2rad(azi_list)).to(torch.float32).to(device)
-    elif conf.check_type == 'azi':
-        azi_list = np.array([x for x in range(lower_bound, upper_bound, conf.check_step)]) / 10.0  + np.round(np.rad2deg(gt_azimuth),0) # all
+        elev_list = np.array([x for x in range(lower_bound, upper_bound, conf.check_step)]) / 10.0  + np.round(np.rad2deg(gt_elevation),0)
+        start_elevation = Tensor(np.deg2rad(elev_list)).to(torch.float32).to(device)
+        max_iter = len(elev_list)
+    else:
+        azi_list = np.array([x for x in range(lower_bound, upper_bound, conf.check_step)]) / 10.0  + np.round(np.rad2deg(gt_azimuth),0)
         start_azimuth = Tensor(np.deg2rad(azi_list)).to(torch.float32).to(device)
-    max_iter = len(azi_list)
+        max_iter = len(azi_list)
+
     max_index = conf.input.max_index
     min_index = max_index if conf.input.min_index is None else max(conf.input.min_index, 0)
     curr_time = time.localtime(time.time())
@@ -488,11 +491,18 @@ def main_run(conf,
         for j, iter in enumerate(pbar, start=1):
             pbar.set_description_str(f'[{j}/{max_iter}]')
             with torch.no_grad():
-                pred_target, pred_x0, input_latent, target_latent, target_im_z,\
-                latent_diff, latent_x0_diff, noise_loss = sample_model(input_im, target_im, LDModel, precision, h, w, 
-                                                           start_elevation, start_azimuth[iter].unsqueeze(0), 
-                                                           start_radius, n_samples= n_samples, scale= scale,
-                                                           ddim_steps= ddim_steps, ddim_eta= ddim_eta, index= index)
+                if conf.check_type == 'elev':
+                    pred_target, pred_x0, input_latent, target_latent, target_im_z,\
+                    latent_diff, latent_x0_diff, noise_loss = sample_model(input_im, target_im, LDModel, precision, h, w, 
+                                                            start_elevation[iter].unsqueeze(0), start_azimuth, 
+                                                            start_radius, n_samples= n_samples, scale= scale,
+                                                            ddim_steps= ddim_steps, ddim_eta= ddim_eta, index= index)
+                else:
+                    pred_target, pred_x0, input_latent, target_latent, target_im_z,\
+                    latent_diff, latent_x0_diff, noise_loss = sample_model(input_im, target_im, LDModel, precision, h, w, 
+                                                            start_elevation, start_azimuth[iter].unsqueeze(0), 
+                                                            start_radius, n_samples= n_samples, scale= scale,
+                                                            ddim_steps= ddim_steps, ddim_eta= ddim_eta, index= index)
                 decode_pred_target   = LDModel.decode_first_stage(pred_target)
                 decode_input_latent  = LDModel.decode_first_stage(input_latent)
                 decode_target_latent = LDModel.decode_first_stage(target_latent)
@@ -571,7 +581,10 @@ def main_run(conf,
                 # decode_loss_index.append(decode_loss.item())
                 #endregion
 
-                idp_pose=torch.cat([start_elevation, start_azimuth[iter].unsqueeze(0), start_radius], dim=-1)
+                if conf.check_type == 'elev':
+                    idp_pose=torch.cat([start_elevation[iter].unsqueeze(0), start_azimuth, start_radius], dim=-1)
+                else:
+                    idp_pose=torch.cat([start_elevation, start_azimuth[iter].unsqueeze(0), start_radius], dim=-1)
                 raw_input_im = rearrange(input_im,'b c h w -> b h w c')
                 raw_target_im = rearrange(target_im,'b c h w -> b h w c')
                 idp_single_loss, loss_dict = idp_noise_loss(LDModel, raw_input_im, raw_target_im, idp_pose,
@@ -583,8 +596,12 @@ def main_run(conf,
                 if conf.model.loss_amp:
                     total_loss = total_loss * conf.model.loss_amp
             # region logging
-                temp_elev= np.rad2deg(start_elevation.item())
-                temp_azi= np.rad2deg(start_azimuth[iter].item())
+                if conf.check_type == 'elev':
+                    temp_elev= np.rad2deg(start_elevation[iter].item())
+                    temp_azi= np.rad2deg(start_azimuth.item())
+                else:
+                    temp_elev= np.rad2deg(start_elevation.item())
+                    temp_azi= np.rad2deg(start_azimuth[iter].item())
                 temp_radius= start_radius.item()
 
                 err = [temp_elev - np.rad2deg(gt_elevation), temp_azi - np.rad2deg(gt_azimuth), temp_radius - gt_radius]
@@ -777,8 +794,8 @@ if __name__ == '__main__':
     target_image = Image.open(target_image_path)
     gt_elev_deg = 0
     gt_azi_deg = 0
-    match1 = re.search(r"elev=(-?[\d.]+)_azi=(-?[\d.]+)", ref_image_path)
-    match2 = re.search(r"elev=(-?[\d.]+)_azi=(-?[\d.]+)", target_image_path)
+    match1 = re.search(r"(-?[\d.]+)_(-?[\d.]+)", ref_image_path)
+    match2 = re.search(r"(-?[\d.]+)_(-?[\d.]+)", target_image_path)
     if match1 and match2:
         gt_elev_deg = float(match2.group(1)) - float(match1.group(1))
         gt_azi_deg = float(match2.group(2)) - float(match1.group(2))

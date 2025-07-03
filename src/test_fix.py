@@ -112,6 +112,7 @@ def sample_model(input_im, target_im, LDModel, precision, h, w,
             # latent_x0_diff = _target_start_latent - target_im_z
             # Get condintioning
             img_cond = LDModel.get_learned_conditioning(input_im).tile(n_samples, 1, 1)
+            # radius = torch.sin(radius) * 0.8
             T = torch.cat([elevation, torch.sin(azimuth), torch.cos(azimuth), radius])
             T_batch = T[None, None, :].repeat(n_samples, 1, 1)
             c = torch.cat([img_cond, T_batch], dim=-1)
@@ -204,11 +205,11 @@ def main_run(conf,
 
     print("learning_rate = ", learning_rate)
     optimizer = optim.Adam([{'params': est_elev, 'param_names': 'elev'},
-                            {'params': est_azimuth, 'param_names': 'azi'}], lr=learning_rate)
-    # optimizer = optim.Adam([{'params': est_azimuth, 'param_names': 'azi'}], lr=learning_rate)#{'params': est_radius, 'lr': 1e-18}
+                            {'params': est_azimuth, 'param_names': 'azi'},
+                            {'params': est_radius}], lr=learning_rate)
+    # optimizer = optim.Adam([{'params': est_azimuth, 'param_names': 'azi'}], lr=learning_rate)#
 
-    # scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=conf.model.lr_scheduler.milestones,
-    #                                            gamma=conf.model.lr_scheduler.gamma)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor= conf.model.lr_scheduler.gamma, patience= conf.model.lr_scheduler.patience)
 
     max_iter = conf.model.iters
     pbar = tqdm(range(max_iter), desc='DDIM', total=max_iter, ncols=140)
@@ -216,7 +217,7 @@ def main_run(conf,
     min_index = max_index if conf.input.min_index is None else max(conf.input.min_index, 0)
     idx_decrease_interval = max_iter / (max_index - min_index + 1)
     for i, iter in enumerate(pbar, start=1):
-        pbar.set_description_str(f'[{iter}/{max_iter}]')
+        pbar.set_description_str(f'[{i}/{max_iter}]')
         optimizer.zero_grad()
 
         """  random index
@@ -263,7 +264,7 @@ def main_run(conf,
         # img_loss       = nn.functional.mse_loss(decode_pred_target, decode_target_latent)
         # img_x0_loss    = nn.functional.mse_loss(decode_pred_x0, target_im.expand_as(blur_decode_pred_x0))
         # blur_img_loss       = nn.functional.mse_loss(blur_decode_pred_target, blur_decode_target_latent)
-        # blur_img_x0_loss    = nn.functional.mse_loss(blur_decode_pred_x0, blur_target_im.expand_as(blur_decode_pred_x0))
+        blur_img_x0_loss    = nn.functional.mse_loss(blur_decode_pred_x0, blur_target_im.expand_as(blur_decode_pred_x0))
 
         no_reduct_mse = nn.MSELoss(reduction='none')
         non_zero_elements = target_mask.sum()
@@ -277,7 +278,7 @@ def main_run(conf,
         _blur_mask_img_x0_loss = (no_reduct_mse(blur_decode_pred_x0, blur_target_im.expand_as(blur_decode_pred_x0)) * target_mask.float()).sum()
         blur_mask_img_x0_loss = _blur_mask_img_x0_loss / non_zero_elements
 
-        loss = blur_mask_img_x0_loss
+        loss = blur_img_x0_loss
         loss.backward()
         # toPil = transforms.ToPILImage()
         if conf.log_all_img and i % conf.log_all_img_freq == 0:
@@ -307,23 +308,27 @@ def main_run(conf,
             # endregion
 
         optimizer.step()
-        # if conf.model.lr_scheduler.use:
-        #     scheduler.step()
+        if conf.model.lr_scheduler.use:
+            scheduler.step(loss)
         with torch.no_grad():
-            dist_err, angular_err = compute_angular_error(pred_rel_sph= [est_elev.item(), est_azimuth.item(), est_radius.item()], 
+            dist_err, angular_err, temp_dist = compute_angular_error(pred_rel_sph= [est_elev.item(), est_azimuth.item(), est_radius.item()], 
                                                 gt_rel_sph= [gt_elevation, gt_azimuth, gt_radius], radius= .35)
             temp_elev= np.rad2deg(est_elev.item())
             temp_azi= np.rad2deg(est_azimuth.item())
 
-            err = [temp_elev - np.rad2deg(gt_elevation), temp_azi - np.rad2deg(gt_azimuth)]
-            pbar.set_postfix_str(f'step: {index}-{int(1000//ddim_steps) * max(index, 0) + 1}, ' +
-                                 f'loss: {loss.item():.3f}, Err elev, azi= {err[0]:.2f}, {err[1]:.2f}, ' +
-                                 f'Curr= {temp_elev:.2f}, {temp_azi:.2f}')
+            err = [temp_elev - np.rad2deg(gt_elevation), temp_azi - np.rad2deg(gt_azimuth), temp_dist - gt_radius]
+            pbar.set_postfix_str(
+                                 f'step: {index}-{int(1000//ddim_steps) * max(index, 0) + 1}, ' +
+                                 f'lr: {optimizer.state_dict()["param_groups"][0]["lr"]:.3f}, ' +
+                                 f'loss: {loss.item():.3f}, Err= {angular_err:.2f}, {err[2]:.2f} ' +
+                                 f'Curr= {temp_elev:.2f}, {temp_azi:.2f}, {temp_dist:.2f}' )
             wb_run.log({
                 "Estimate/elevation":           temp_elev,
                 "Estimate/azimuth":             temp_azi,
-                'Error/elevation':              err[0],
-                'Error/azimuth':                err[1],
+                "Estimate/radius":              temp_dist,
+                'Error/elevation':              abs(err[0]),
+                'Error/azimuth':                abs(err[1]),
+                'Error/radius':                 abs(err[2]),
                 'Error/dist':                   dist_err,
                 'Error/angular':                angular_err,
                 'Log/ddim_index':               index,
@@ -333,7 +338,7 @@ def main_run(conf,
                 # 'Loss/mask_img':                mask_img_loss.item(),
                 # 'Loss/mask_img_x0':             mask_img_x0_loss.item(),
                 # 'Loss/blur_img':                blur_img_loss.item(),
-                # 'Loss/blur_img_x0':             blur_img_x0_loss.item(),
+                'Loss/blur_img_x0':             blur_img_x0_loss.item(),
                 # 'Loss/blur_mask_img':           blur_mask_img_loss.item(),
                 'Loss/blur_mask_img_x0':        blur_mask_img_x0_loss.item(),
                 # 'Loss/latent_diff_loss':        latent_diff_loss.item(),
@@ -367,38 +372,49 @@ if __name__ == '__main__':
 
     ref_image_path = os.path.join(conf.dataroot, conf.input.ref_image)
     target_image_path = os.path.join(conf.dataroot, conf.input.target_image)
+    assert torch.cuda.is_available()
+    assert os.path.exists(conf.model.ckpt)
+    assert os.path.exists(conf.model.model_config)
+    assert os.path.exists(target_image_path)
+    assert os.path.exists(target_image_path)
     rel_elev_deg = conf.input.rel_elev
     rel_azi_deg = conf.input.rel_azi
     rel_radius = conf.input.rel_radius
     device = f"cuda:{conf.model.gpu_idx}"
     model_config_obj = OmegaConf.load(conf.model.model_config)
 
-    assert torch.cuda.is_available()
-    assert os.path.exists(conf.model.ckpt)
-    assert os.path.exists(ref_image_path)
-    # assert conf.model.lr_scheduler
-
     # region Load image and check gt.
     ref_image = Image.open(ref_image_path)
     target_image = Image.open(target_image_path)
     gt_elev_deg = 0
     gt_azi_deg = 0
-    match1 = re.search(r"elev=(-?[\d.]+)_azi=(-?[\d.]+)", ref_image_path)
-    match2 = re.search(r"elev=(-?[\d.]+)_azi=(-?[\d.]+)", target_image_path)
-    if match1 and match2:
-        gt_elev_deg = float(match2.group(1)) - float(match1.group(1))
-        gt_azi_deg = float(match2.group(2)) - float(match1.group(2))
+    if conf.train_type == 'all':
+        match1 = re.search(r"(-?[\d.]+)_(-?[\d.]+)_(-?[\d][.][\d]+)", ref_image_path)
+        match2 = re.search(r"(-?[\d.]+)_(-?[\d.]+)_(-?[\d][.][\d]+)", target_image_path)
+        if match1 and match2:
+            gt_elev_deg = float(match2.group(1)) - float(match1.group(1))
+            gt_azi_deg = float(match2.group(2)) - float(match1.group(2))
+            gt_radius = float(match2.group(3)) - float(match1.group(3))
         if gt_azi_deg > 180:
             gt_azi_deg -= 360
-        print(f"start_rel: elev= {rel_elev_deg}, azi= {rel_azi_deg} | gt_rel: elev= {gt_elev_deg}, azi= {gt_azi_deg}")
+        print(f"start_rel: elev= {rel_elev_deg}, azi= {rel_azi_deg} | gt_rel: elev= {gt_elev_deg}, azi= {gt_azi_deg}, radius= {gt_radius}")
     else:
-        match1 = re.search(r"(-?[\d.]+)_(-?[\d.]+)", ref_image_path)
-        match2 = re.search(r"(-?[\d.]+)_(-?[\d.]+)", target_image_path)
-        gt_elev_deg = float(match2.group(1)) - float(match1.group(1))
-        gt_azi_deg = float(match2.group(2)) - float(match1.group(2))
-        if gt_azi_deg > 180:
-            gt_azi_deg -= 360
-        print(f"start_rel: elev= {rel_elev_deg}, azi= {rel_azi_deg} | gt_rel: elev= {gt_elev_deg}, azi= {gt_azi_deg}")
+        match1 = re.search(r"elev=(-?[\d.]+)_azi=(-?[\d.]+)", ref_image_path)
+        match2 = re.search(r"elev=(-?[\d.]+)_azi=(-?[\d.]+)", target_image_path)
+        if match1 and match2:
+            gt_elev_deg = float(match2.group(1)) - float(match1.group(1))
+            gt_azi_deg = float(match2.group(2)) - float(match1.group(2))
+            if gt_azi_deg > 180:
+                gt_azi_deg -= 360
+            print(f"start_rel: elev= {rel_elev_deg}, azi= {rel_azi_deg} | gt_rel: elev= {gt_elev_deg}, azi= {gt_azi_deg}")
+        else:
+            match1 = re.search(r"(-?[\d.]+)_(-?[\d.]+)", ref_image_path)
+            match2 = re.search(r"(-?[\d.]+)_(-?[\d.]+)", target_image_path)
+            gt_elev_deg = float(match2.group(1)) - float(match1.group(1))
+            gt_azi_deg = float(match2.group(2)) - float(match1.group(2))
+            if gt_azi_deg > 180:
+                gt_azi_deg -= 360
+            print(f"start_rel: elev= {rel_elev_deg}, azi= {rel_azi_deg} | gt_rel: elev= {gt_elev_deg}, azi= {gt_azi_deg}")
     # endregion
 
     # region Instantiate all models beforehand for efficiency.
@@ -427,7 +443,7 @@ if __name__ == '__main__':
         entity="kevin-shih",
         project="Zero123-Adv",
         group= f'{conf.group_name}',
-        name= f'{conf.run_name}_gt-{gt_elev_deg:.0f}-{gt_azi_deg:.0f}',
+        name= f'{conf.run_name}_gt-{gt_elev_deg:.0f}-{gt_azi_deg:.0f}-{gt_radius:.2f}',
         settings=wandb.Settings(x_disable_stats=True),
         config={
                 "start_date": f'{mon:02d}-{mday:02d}',
@@ -445,7 +461,7 @@ if __name__ == '__main__':
              learning_rate = conf.model.lr,
              gt_elevation = np.deg2rad(gt_elev_deg),
              gt_azimuth = np.deg2rad(gt_azi_deg),
-             gt_radius = 0.0,
+             gt_radius = gt_radius,
              start_elevation = np.deg2rad(rel_elev_deg),
              start_azimuth = np.deg2rad(rel_azi_deg),
              start_radius = conf.input.rel_radius,

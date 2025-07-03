@@ -172,11 +172,16 @@ if __name__ == "__main__":
     rotate_by_elev = 5   #How many degrees to rotate the knob for every step
     rotate_by_azi = 5   #How many degrees to rotate the knob for every step
     start_angle = 0      #What angle to start from
-    for elev in range(0, 181, rotate_by_elev): # elev
+    for elev in range(60, 121, rotate_by_elev): # elev
         for azi in range(0, 361, rotate_by_azi): # azi
-            render.filepath = f"{target_dir}/{elev-90}_{azi}.png"
-            if(os.path.exists(render.filepath)):
-                continue
-            model.rotation_euler = (np.deg2rad(elev), np.deg2rad(azi), 0)
-            model.location = (0, 0, 0)
-            bpy.ops.render.render(write_still=True, use_viewport= True)
+            if azi > 45 and azi < 315: continue
+            rand_radius = np.random.rand(5) * 1.15 - 0.15 # -0.15 to 1.0
+            for radius in list(rand_radius): # radius
+                radius = np.round(radius, 2)
+                render.filepath = f"{target_dir}/{90-elev}_{azi}_{radius:.2f}.png"
+                if(os.path.exists(render.filepath)):
+                    continue
+                model.rotation_euler = (np.deg2rad(elev), np.deg2rad(azi), 0)
+                model.location = (0, 0, 0)
+                cam.location[2] = -0.35 - radius
+                bpy.ops.render.render(write_still=True, use_viewport= True)
