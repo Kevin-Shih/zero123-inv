@@ -87,22 +87,22 @@ def load_and_preprocess(interface, input_im):
     image = np.array(image)
     foreground = est_seg[:, : , -1].astype(np.bool_)
     image[~foreground] = [255., 255., 255.]
-    x, y, w, h = cv2.boundingRect(foreground.astype(np.uint8))
-    foreground = foreground[y:y+h, x:x+w]
-    foreground = PIL.Image.fromarray(np.array(foreground))
-    image = image[y:y+h, x:x+w, :]
-    image = PIL.Image.fromarray(np.array(image))
+    # x, y, w, h = cv2.boundingRect(foreground.astype(np.uint8))
+    # foreground = foreground[y:y+h, x:x+w]
+    # foreground = PIL.Image.fromarray(np.array(foreground))
+    # image = image[y:y+h, x:x+w, :]
+    # image = PIL.Image.fromarray(np.array(image))
 
-    # resize image such that long edge is 512
-    foreground.thumbnail([200, 200], Image.Resampling.LANCZOS)
-    # print('foreground size:', foreground.size)
-    foreground = add_margin(foreground, (0), size=256)
-    # foreground.save('../foreground.png')
-    foreground = np.array(foreground)
-    image.thumbnail([200, 200], Image.Resampling.LANCZOS)
-    # print('image size:', image.size)
-    image = add_margin(image, (255, 255, 255), size=256)
-    image = np.array(image)
+    # # resize image such that long edge is 512
+    # foreground.thumbnail([200, 200], Image.Resampling.LANCZOS)
+    # # print('foreground size:', foreground.size)
+    # foreground = add_margin(foreground, (0), size=256)
+    # # foreground.save('../foreground.png')
+    # foreground = np.array(foreground)
+    # image.thumbnail([200, 200], Image.Resampling.LANCZOS)
+    # # print('image size:', image.size)
+    # image = add_margin(image, (255, 255, 255), size=256)
+    # image = np.array(image)
 
     return image, foreground
 

@@ -32,7 +32,7 @@ input:
   min_index: 20
   input_type: "perfect" # for logging
 group_name: "PerfectInput"
-run_name: "Blurk9_3_idx35-20_all"
+run_name: "Idx35-20_all_norecenter_rescale_dist_search2"
 log_all_img: False
 log_all_img_freq: 10
 comment: "ReduceLROnPlateau, xl_Blurk9_3_idx35_BlurMaskImgX0"

@@ -112,7 +112,7 @@ def sample_model(input_im, target_im, LDModel, precision, h, w,
             # latent_x0_diff = _target_start_latent - target_im_z
             # Get condintioning
             img_cond = LDModel.get_learned_conditioning(input_im).tile(n_samples, 1, 1)
-            # radius = torch.sin(radius) * 0.8
+            radius = torch.sin(radius-0.35) * 0.8
             T = torch.cat([elevation, torch.sin(azimuth), torch.cos(azimuth), radius])
             T_batch = T[None, None, :].repeat(n_samples, 1, 1)
             c = torch.cat([img_cond, T_batch], dim=-1)
@@ -120,29 +120,8 @@ def sample_model(input_im, target_im, LDModel, precision, h, w,
             cond = {}
             cond['c_crossattn'] = [c_proj]
             cond['c_concat'] = [input_encoder_posterior.mode().detach().repeat(n_samples, 1, 1, 1)]
-            uc = {}
-            uc['c_concat'] = [torch.zeros(size, device=img_cond.device)]
-            uc['c_crossattn'] = [torch.zeros_like(c_proj, device=img_cond.device)]
             # endregion
-            if uc is None or scale == 1.:
-                e_t = LDModel.apply_model(input_latent, t, cond)
-            else:
-                x_in = torch.cat([input_latent] * 2)
-                t_in = torch.cat([t] * 2)
-                if isinstance(cond, dict):
-                    assert isinstance(uc, dict)
-                    c_in = dict()
-                    for k in cond:
-                        if isinstance(cond[k], list):
-                            c_in[k] = [torch.cat([uc[k][i],
-                                        cond[k][i]]) for i in range(len(cond[k]))]
-                        else:
-                            c_in[k] = torch.cat([uc[k], cond[k]])
-                else:
-                    assert not isinstance(uc, dict)
-                    c_in = torch.cat([uc, cond])
-                e_t_uncond, e_t = LDModel.apply_model(x_in, t_in, c_in).chunk(2)
-                e_t = e_t_uncond + scale * (e_t - e_t_uncond)
+            e_t = LDModel.apply_model(input_latent, t, cond)
 
             # a_t, a_prev, sigma_t, sqrt_one_minus_at = calculate_param_ddim(sampler, index, n_samples, img_cond.device)
             a_t, a_prev, sigma_t, sqrt_one_minus_at = sampler.calculate_param_ddim(index, n_samples, img_cond.device)
