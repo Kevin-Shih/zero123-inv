@@ -468,6 +468,7 @@ def main_run(conf,
         #               f'_st-{rel_elev_deg:.0f}-{rel_azi_deg:.0f}'
         
         wb_run = wandb.init(
+            dir="../wandb/loss_curve_1D",
             entity="kevin-shih",
             project="Zero123-Adv-Loss-Check",
             group= f'{conf.group_name}_{group_mon:02d}-{group_mday:02d}_{group_hours:02d}_{group_mins:02d}' if max_index > min_index else conf.group_name,

@@ -23,11 +23,10 @@ from torch.nn.parameter import Parameter
 from torch.amp.autocast_mode import autocast
 from torchvision import transforms
 from transformers import AutoFeatureExtractor
-from utils.pose import compute_angular_error
-from utils.util import mask_resize
+from utils import compute_angular_error, mask_resize
 
 
-def load_model_from_config(config, sckpt, device, verbose=False):
+def load_model_from_config(config, ckpt, device, verbose=False):
     print(f'Loading model from {ckpt}')
     pl_sd = torch.load(ckpt, map_location='cpu')
     # if 'global_step' in pl_sd:
@@ -347,8 +346,6 @@ if __name__ == '__main__':
     assert torch.cuda.is_available()
     assert os.path.exists(conf.model.ckpt)
     assert os.path.exists(conf.model.model_config)
-    assert os.path.exists(ref_image_path)
-    assert os.path.exists(target_image_path)
     rel_elev_deg = conf.input.rel_elev
     rel_azi_deg = conf.input.rel_azi
     rel_radius = conf.input.rel_radius
@@ -412,7 +409,7 @@ if __name__ == '__main__':
     hours = curr_time.tm_hour
     mins = curr_time.tm_min + curr_time.tm_sec / 60
     wb_run = wandb.init(
-        dir="../wandb/test_fix",
+        dir="../wandb/eval",
         entity="kevin-shih",
         project="Zero123-Adv",
         group= f'{conf.group_name}',

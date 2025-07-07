@@ -1,5 +1,4 @@
 import numpy as np
-import torch
 from torchvision import transforms
 
 def cartesian_to_spherical(xyz):
@@ -170,18 +169,3 @@ def compute_angular_error(pred_rel_sph, gt_rel_sph, radius=0.35):
     theta = np.arccos(tr.clip(-1, 1))
 
     return dist, np.rad2deg(theta), pred_rel_sph[2]
-
-def mask_resize(mask, size:int):
-    """
-    Resize a mask to the specified size.
-    Args:
-        mask (torch.Tensor): The input mask tensor.
-        size (tuple): The target size (height, width).
-    Returns:
-        torch.Tensor: The resized mask tensor.
-    """
-   
-    resize_transform = transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR)
-    mask = resize_transform(mask.unsqueeze(0))
-    mask = transforms.CenterCrop((256, 256))(mask)
-    return mask[0]
