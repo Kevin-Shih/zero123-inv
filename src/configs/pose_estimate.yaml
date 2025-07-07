@@ -11,7 +11,7 @@ model:
   lr_scheduler:
     use: True
     type: ReduceLROnPlateau
-    gamma: 0.7
+    gamma: 0.6
     patience: 10
   guide_scale: 1.0
   ddim_eta: 1.0
@@ -24,7 +24,8 @@ input:
   # ref_image: "elev=0_azi=0.png"
   # target_image: "elev=0_azi=40.png"
   ref_image: "0_0_0.00.png"
-  target_image: "-10_10_0.29.png"
+  target_image: "20_350_0.16.png"
+  # target_image: "-10_10_0.29.png"
   rel_elev: 0.0
   rel_azi: 0.0
   rel_radius: 0.0
@@ -32,8 +33,8 @@ input:
   min_index: 20
   input_type: "perfect" # for logging
 group_name: "PerfectInput"
-run_name: "Idx35-20_all_norecenter_rescale_dist_search2"
+run_name: "Idx35-20_all_norecenter_search2_adapMask"
 log_all_img: False
 log_all_img_freq: 10
-comment: "ReduceLROnPlateau, xl_Blurk9_3_idx35_BlurMaskImgX0"
+comment: "ReduceLROnPlateau0.6_rescale_dist, xl_Blurk9_3_idx35_BlurMaskImgX0"
 train_type: "all"

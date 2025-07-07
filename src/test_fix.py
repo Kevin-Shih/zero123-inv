@@ -23,7 +23,7 @@ from torch.nn.parameter import Parameter
 from torch.amp.autocast_mode import autocast
 from torchvision import transforms
 from transformers import AutoFeatureExtractor
-from utils import compute_angular_error
+from utils import compute_angular_error, mask_resize
 
 
 def load_model_from_config(config, ckpt, device, verbose=False):
@@ -82,11 +82,9 @@ def preprocess_image(models, input_im, preprocess, h=256, w=256, device='cuda'):
     input_im = transforms.Resize([h, w])(input_im)
     return input_im, forground_mask
 
-def sample_model(input_im, target_im, LDModel, precision, h, w,
+def sample_model(input_im, target_im, LDModel, sampler, precision, h, w,
                  elevation, azimuth, radius, n_samples,
                  scale = 3.0, ddim_steps= 75, ddim_eta= 0.15, index = 5):
-    sampler = DDIMSampler(LDModel)
-    sampler.make_schedule(ddim_num_steps=ddim_steps, ddim_discretize="uniform", ddim_eta=ddim_eta, verbose=False)
     step = int(1000//ddim_steps) * max(index, 0) + 1
     step_target_inter = int(1000//ddim_steps) if index > 0 else 1
     precision_scope = autocast if precision == 'autocast' else nullcontext
@@ -95,7 +93,6 @@ def sample_model(input_im, target_im, LDModel, precision, h, w,
             # region input/condition
             # Set time step and noisy latent shape
             t = torch.full((n_samples,), step, device=input_im.device, dtype=torch.long)
-            size = (n_samples, 4, h // 8, w // 8)
             # Get input & target latent
             input_encoder_posterior = LDModel.encode_first_stage(input_im)
             input_im_z = LDModel.get_first_stage_encoding(input_encoder_posterior)
@@ -104,15 +101,10 @@ def sample_model(input_im, target_im, LDModel, precision, h, w,
             # Add noise to the input latent and target latent
             _noise = torch.randn_like(input_im_z)
             input_latent = LDModel.q_sample(target_im_z.clone().detach(), t, _noise) # perfecInput
-            # input_latent = LDModel.q_sample(input_im_z, t, _noise) # fix input
-            # _target_start_latent = LDModel.q_sample(target_im_z.clone().detach(), t, _noise)
             target_latent = LDModel.q_sample(target_im_z, t-step_target_inter, _noise)
-
-            # latent_diff = _target_start_latent - target_latent
-            # latent_x0_diff = _target_start_latent - target_im_z
             # Get condintioning
             img_cond = LDModel.get_learned_conditioning(input_im).tile(n_samples, 1, 1)
-            radius = torch.sin(radius-0.35) * 0.8
+            radius = torch.sin(radius-0.35) * 0.8 # search2
             T = torch.cat([elevation, torch.sin(azimuth), torch.cos(azimuth), radius])
             T_batch = T[None, None, :].repeat(n_samples, 1, 1)
             c = torch.cat([img_cond, T_batch], dim=-1)
@@ -143,7 +135,7 @@ def main_run(conf,
              preprocess=True,
              scale=3.0, n_samples=1, ddim_steps=75, ddim_eta=0.15,
              learning_rate = 1e-3,
-             precision='fp32', h=256, w=256,):
+             precision='fp32', h=256, w=256, mask_init_size = 1.25):
     '''
     :param raw_im (PIL Image).
     '''
@@ -153,7 +145,9 @@ def main_run(conf,
 
     input_im, _ = preprocess_image(models, input_im, preprocess, h=h, w=w, device=device)
     target_im, target_mask = preprocess_image(models, target_im, preprocess, h=h, w=w, device=device)
-    target_mask = Tensor(target_mask).to(device)
+    _target_mask = Tensor(target_mask).to(device)
+    target_mask = mask_resize(_target_mask, size=int(256*mask_init_size))
+    mask_size_step = (mask_init_size - 1) / int(conf.model.iters / 20)
     wb_run.log({'Image/input_im':  wandb.Image(torch.clamp((input_im + 1.0) / 2.0, min=0.0, max=1.0)[0],  caption=f"input_im"),
                 'Image/target_im': wandb.Image(torch.clamp((target_im + 1.0) / 2.0, min=0.0, max=1.0)[0], caption=f"target_im"),
     }, step=0)
@@ -195,21 +189,16 @@ def main_run(conf,
     max_index = conf.input.max_index
     min_index = max_index if conf.input.min_index is None else max(conf.input.min_index, 0)
     idx_decrease_interval = max_iter / (max_index - min_index + 1)
+
+    sampler = DDIMSampler(LDModel)
+    sampler.make_schedule(ddim_num_steps=ddim_steps, ddim_discretize="uniform", ddim_eta=ddim_eta, verbose=False)
     for i, iter in enumerate(pbar, start=1):
         pbar.set_description_str(f'[{i}/{max_iter}]')
         optimizer.zero_grad()
 
-        """  random index
-        if iter < 200:
-            index = np.random.randint(20, max_index)
-        elif iter < 500:
-            index = np.random.randint(10, 20)
-        else:
-            index = np.random.randint(min_index, 10)
-        """
         index = int(max_index - iter//idx_decrease_interval)
-        pred_target, pred_x0, input_latent, target_latent, target_latent_x0, noise_loss = sample_model(input_im, target_im, LDModel, precision,
-                                                    h, w, est_elev, est_azimuth, est_radius, n_samples= n_samples, scale= scale,
+        pred_target, pred_x0, input_latent, target_latent, target_latent_x0, noise_loss = sample_model(input_im, target_im, LDModel, sampler,
+                                                    precision, h, w, est_elev, est_azimuth, est_radius, n_samples= n_samples, scale= scale,
                                                     ddim_steps= ddim_steps, ddim_eta= ddim_eta, index= index)
                
         # decode_pred_target   = LDModel.decode_first_stage(pred_target)
@@ -257,7 +246,7 @@ def main_run(conf,
         _blur_mask_img_x0_loss = (no_reduct_mse(blur_decode_pred_x0, blur_target_im.expand_as(blur_decode_pred_x0)) * target_mask.float()).sum()
         blur_mask_img_x0_loss = _blur_mask_img_x0_loss / non_zero_elements
 
-        loss = blur_img_x0_loss
+        loss = blur_mask_img_x0_loss
         loss.backward()
         # toPil = transforms.ToPILImage()
         if conf.log_all_img and i % conf.log_all_img_freq == 0:
@@ -290,6 +279,9 @@ def main_run(conf,
         if conf.model.lr_scheduler.use:
             scheduler.step(loss)
         with torch.no_grad():
+            if iter % 20 == 0:
+                mask_factor = int(iter / 20 + 1)
+                target_mask = mask_resize(_target_mask, size=int(256*(mask_init_size - mask_factor * mask_size_step)))
             dist_err, angular_err, temp_dist = compute_angular_error(pred_rel_sph= [est_elev.item(), est_azimuth.item(), est_radius.item()], 
                                                 gt_rel_sph= [gt_elevation, gt_azimuth, gt_radius], radius= .35)
             temp_elev= np.rad2deg(est_elev.item())
