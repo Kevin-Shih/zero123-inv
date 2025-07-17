@@ -5,7 +5,7 @@ import os
 import numpy as np
 import torch
 
-from utils.pose import make_T, mat2latlon
+from utils.pose import make_T, mat2sph
 from utils.typing import *
 from utils.util import load_image
 

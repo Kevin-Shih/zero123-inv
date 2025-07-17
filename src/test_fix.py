@@ -23,11 +23,11 @@ from torch.nn.parameter import Parameter
 from torch.amp.autocast_mode import autocast
 from torchvision import transforms
 from transformers import AutoFeatureExtractor
-from utils.pose import compute_angular_error
+from utils.pose import compute_pose_error
 from utils.util import mask_resize
 
 
-def load_model_from_config(config, sckpt, device, verbose=False):
+def load_model_from_config(config, ckpt, device, verbose=False):
     print(f'Loading model from {ckpt}')
     pl_sd = torch.load(ckpt, map_location='cpu')
     # if 'global_step' in pl_sd:
@@ -283,7 +283,7 @@ def main_run(conf,
             if iter % 20 == 0:
                 mask_factor = int(iter / 20 + 1)
                 target_mask = mask_resize(_target_mask, size=int(256*(mask_init_size - mask_factor * mask_size_step)))
-            dist_err, angular_err, temp_dist = compute_angular_error(pred_rel_sph= [est_elev.item(), est_azimuth.item(), est_radius.item()], 
+            dist_err, angular_err, temp_dist = compute_pose_error(pred_rel_sph= [est_elev.item(), est_azimuth.item(), est_radius.item()], 
                                                 gt_rel_sph= [gt_elevation, gt_azimuth, gt_radius], radius= .35)
             temp_elev= np.rad2deg(est_elev.item())
             temp_azi= np.rad2deg(est_azimuth.item())

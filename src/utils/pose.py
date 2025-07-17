@@ -1,5 +1,5 @@
 import numpy as np
-from torchvision import transforms
+import torch
 
 def cartesian_to_spherical(xyz):
 
@@ -118,20 +118,20 @@ def sph2mat(sph):
     c2w = np.linalg.inv(mv)
     return c2w, w2c
 
-# def mat2sph(T, in_deg=False, return_radius=False):
-#     if len(T.shape) == 2:
-#         T = T.unsqueeze(0)
-#     xyz = T[:, :3, 3]
-#     radius = torch.norm(xyz, dim=1, keepdim=True)
-#     xyz = xyz / radius
-#     theta = -torch.asin(xyz[:, 1])
-#     azimuth = torch.atan2(xyz[:, 0], xyz[:, 2])
+def mat2sph(T, in_deg=False, return_radius=False):
+    if len(T.shape) == 2:
+        T = T.unsqueeze(0)
+    xyz = T[:, :3, 3]
+    radius = torch.norm(xyz, dim=1, keepdim=True)
+    xyz = xyz / radius
+    theta = -torch.asin(xyz[:, 1])
+    azimuth = torch.atan2(xyz[:, 0], xyz[:, 2])
 
-#     if in_deg:
-#         theta, azimuth = theta.rad2deg(), azimuth.rad2deg()
-#     if return_radius:
-#         return torch.stack((theta, azimuth, radius.squeeze(0))).T.numpy()
-#     return torch.stack((theta, azimuth)).T.numpy()
+    if in_deg:
+        theta, azimuth = theta.rad2deg(), azimuth.rad2deg()
+    if return_radius:
+        return torch.stack((theta, azimuth, radius.squeeze(0))).T.numpy()
+    return torch.stack((theta, azimuth)).T.numpy()
 
 def c2w_to_elu(c2w):
 
@@ -143,12 +143,12 @@ def c2w_to_elu(c2w):
 
     return eye, lookat, up
 
-def compute_angular_error(pred_rel_sph, gt_rel_sph, radius=0.35):
+def compute_pose_error(pred_rel_sph, gt_rel_sph, radius=0.35):
     # Scaling relative radius from the zero123 scale to the actual scale.
     # The scale range of zero123 is (1.5, 2.2), we use the average value 1.85 as the zero123 scale.
-    pred_rel_sph[2] += radius
-    gt_rel_sph[2] += radius
-    pred_rel_sph[2] = pred_rel_sph[2] * radius / 1.85
+    # pred_rel_sph[2] += radius
+    # gt_rel_sph[2] += radius
+    # pred_rel_sph[2] = pred_rel_sph[2] * radius / 1.85
 
     pred_c2w, pred_w2c = sph2mat(pred_rel_sph)
     # pred_w2c = np.linalg.inv(pred_c2w)
@@ -158,7 +158,7 @@ def compute_angular_error(pred_rel_sph, gt_rel_sph, radius=0.35):
 
     pred_xyz = pred_c2w[:3, 3]
     gt_xyz = gt_c2w[:3, 3]
-    dist = np.linalg.norm(pred_xyz - gt_xyz, 2) / radius
+    dist = np.linalg.norm(pred_xyz - gt_xyz)
 
     target_rot = gt_w2c[:3, :3]
     pred_rot = pred_w2c[:3, :3]
@@ -169,3 +169,15 @@ def compute_angular_error(pred_rel_sph, gt_rel_sph, radius=0.35):
     theta = np.arccos(tr.clip(-1, 1))
 
     return dist, np.rad2deg(theta), pred_rel_sph[2]
+
+def make_T(theta, azimuth, distance, in_deg=False):
+    if in_deg:
+        theta, azimuth = theta.deg2rad(), azimuth.deg2rad()
+    return torch.stack(
+        (
+            theta,
+            torch.sin(azimuth),
+            torch.cos(azimuth),
+            distance,
+        )
+    )

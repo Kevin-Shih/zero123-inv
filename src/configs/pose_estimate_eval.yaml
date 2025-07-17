@@ -1,26 +1,47 @@
+seed: 42
+gpu_idx: 0
 data:
-  dataroot: data
+  root: data
   dataset_name: GSO
-  obj_idx: 0
-model: 
-  gpu_idx: 0
+  obj: 3D_Dollhouse_Happy_Brother
+  idx: [0,1]
+
+  # train
+  image_dir: ${data.root}/${data.dataset_name}/${data.obj}/train/rgb
+  gt_transform_fp: ${data.root}/${data.dataset_name}/${data.obj}/train/transform.json
+  ref_image_path: ${data.image_dir}/${data.idx[0]}.png
+  target_image_path: ${data.image_dir}/${data.idx[1]}.png
+
+  # test
+  test_image_dir: ${data.root}/${data.dataset_name}/${data.obj}/test/rgb
+  test_transform_fp: ${data.root}/${data.dataset_name}/${data.obj}/test/transform.json
+
+  # experiment
+  # exp_root_dir: exp
+  # exp_dir: ${data.exp_root_dir}/${data.dataset_name}/${data.obj}/${data.idx}
+  # transform_fp: ${data.exp_dir}/transform.json
+  # lora_ckpt_fp: ${data.exp_dir}/lora.ckpt
+  # demo_fp:  ${data.exp_dir}/demo.png
+model:
   model_config: "configs/sd-objaverse-finetune-c_concat-256.yaml"
   ckpt: "../zero123-xl.ckpt"
-args:
-  n_samples: 1
+optim:
+  iters: 100
   loss_type: "BluredMaskImgX0" # for logging
   lr: 1e-1
   lr_scheduler:
     type: ReduceLROnPlateau
     gamma: 0.7
     patience: 10
+args:
+  n_samples: 1
   guide_scale: 1.0
+  ddim_steps: 75
   ddim_eta: 1.0
   blur_k_size: 9
   blur_min: null
   blur_max: 3
-  iters: 100
-  clamp: null
+  mask_init_size: 1.25
 input:
   rel_elev: 0.0
   rel_azi: 0.0
@@ -28,7 +49,7 @@ input:
   max_index: 35
   min_index: 20
   input_type: "perfect" # for logging
-group_name: "PerfectInput"
+group_name: "Eval"
 run_name: "Blurk9_3_idx35-20_all"
 log_all_img: False
 log_all_img_freq: 10
