@@ -93,8 +93,8 @@ def pred_pose(models, conf):
     gt_rel_pose = gt_target_pose - gt_ref_pose
     print(f'GT: [{gt_rel_pose[0]:.1f}, {gt_rel_pose[1]:.1f}, {gt_rel_pose[2]:.1f}]')  # in degrees
     gt_rel_pose[:2] = np.deg2rad(gt_rel_pose[:2])
-    target_mask = mask_resize(_target_mask, size=int(256 * mask_init_scale))
-    ref_mask = mask_resize(_ref_mask, size=int(256 * mask_init_scale))
+    
+    
     mask_size_step = (mask_init_scale - 1) / int(conf.optim.iters / 20)
     
     max_iter = conf.optim.iters
@@ -123,6 +123,10 @@ def pred_pose(models, conf):
             scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor= lr_scheduler.gamma, patience= lr_scheduler.patience)
         total_loss = 0
         
+        # print(f"[INFO] Mask factor @ {1}: {mask_init_scale}")
+        target_mask = mask_resize(_target_mask, size=int(256 * mask_init_scale))
+        ref_mask = mask_resize(_ref_mask, size=int(256 * mask_init_scale))
+
         pbar = tqdm(range(max_iter), desc='DDIM', total=max_iter, ncols=165)
         for it, iter in enumerate(pbar, start=1):
             pbar.set_description_str(f'{pose_sph}, [{it}/{max_iter}]')
@@ -170,9 +174,9 @@ def pred_pose(models, conf):
                 if it % 10 == 0 or it == 1:
                     decode_pred_x0 = LDModel.decode_first_stage(pred_x0)
                     decode_pred_x0  = torch.clamp((decode_pred_x0  + 1.0) / 2.0, min=0.0, max=1.0)
-                    print('target_mask', target_mask.max(), target_mask.median(), target_mask.min())
+                    # print('\ntarget_mask', target_mask.max(), target_mask.mean(), target_mask.min())
                     temp_mask1 = target_mask.to(torch.uint8)
-                    print('temp_mask1', temp_mask1.max(), temp_mask1.median(), temp_mask1.min())
+                    # print('temp_mask1', temp_mask1.max(), temp_mask1.mean(), temp_mask1.min())
                     if conf.input.dualway:
                         decode_pred_x0_inv = LDModel.decode_first_stage(pred_x0_inv)
                         decode_pred_x0_inv  = torch.clamp((decode_pred_x0_inv  + 1.0) / 2.0, min=0.0, max=1.0)
@@ -185,8 +189,8 @@ def pred_pose(models, conf):
                     mask_factor = int(iter / 20 + 1)
                     mask_scale = mask_init_scale - mask_factor * mask_size_step
                     # print(f"[INFO] Mask factor @ {it}: {mask_scale}")
-                    target_mask = mask_resize(_target_mask, size=int(256*mask_scale))
-                    ref_mask = mask_resize(_ref_mask, size=int(256*mask_scale))
+                    target_mask = mask_resize(_target_mask, size=int(256 * mask_scale))
+                    ref_mask = mask_resize(_ref_mask, size=int(256 * mask_scale))
 
                 dist_err, angular_err, temp_dist = compute_pose_error(pred_rel_sph= [est_elev.item(), est_azimuth.item(), est_radius.item()], 
                                                     gt_rel_sph= gt_rel_pose, radius= gt_ref_pose[2])
@@ -202,7 +206,7 @@ def pred_pose(models, conf):
         results.append([total_loss, np.rad2deg(est_elev.item()), np.rad2deg(est_azimuth.item()), est_radius.item(), angular_err, dist_err])
         pbar.close()
     results = np.array(results)
-    print(f"[INFO] Total loss: {results[:, 0]}")
+    # print(f"[INFO] Total loss: {results[:, 0]}")
     best_idx = np.argmin(results[:, 0])
     best_pose = results[best_idx][1:]
     estimate_pose = [best_pose[0], best_pose[1], best_pose[2]]
