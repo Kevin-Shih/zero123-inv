@@ -143,7 +143,7 @@ def c2w_to_elu(c2w):
 
     return eye, lookat, up
 
-def compute_pose_error(pred_rel_sph, gt_rel_sph, radius=0.35):
+def compute_pose_error(pred_rel_sph, gt_rel_sph, radius=1.0):
     # Scaling relative radius from the zero123 scale to the actual scale.
     # The scale range of zero123 is (1.5, 2.2), we use the average value 1.85 as the zero123 scale.
     # pred_rel_sph[2] += radius
@@ -166,7 +166,7 @@ def compute_pose_error(pred_rel_sph, gt_rel_sph, radius=0.35):
     R_rel = pred_rot.T @ target_rot
 
     tr = (np.trace(R_rel) - 1) / 2
-    theta = np.arccos(tr.clip(-1, 1))
+    theta = np.arccos(tr)#.clip(-1, 1)
 
     return dist, np.rad2deg(theta), pred_rel_sph[2]
 

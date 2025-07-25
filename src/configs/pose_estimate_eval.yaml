@@ -31,7 +31,7 @@ optim:
   lr: 1e-1
   lr_scheduler:
     type: ReduceLROnPlateau
-    gamma: 0.7
+    gamma: 0.6
     patience: 10
 args:
   n_samples: 1
@@ -43,15 +43,19 @@ args:
   blur_max: 3
   mask_init_size: 1.25
 input:
+  dualway: True
+  init_pose: [[0, 0, 0], [0, 90, 0], [0, 180, 0], [0, -90, 0]]
   rel_elev: 0.0
   rel_azi: 0.0
-  rel_radius: 0.0
-  max_index: 35
-  min_index: 20
+  rel_radius: 1.0
+  max_index: 75
+  min_index: 0
   input_type: "perfect" # for logging
 group_name: "Eval"
-run_name: "Blurk9_3_idx35-20_all"
+run_name: "Idx75-0_dualway_noema_noclip_originbg"
 log_all_img: False
 log_all_img_freq: 10
-comment: "ReduceLROnPlateau, xl_Blurk9_3_idx35_BlurMaskImgX0"
+comment: "noclip on tarce when calculate err, no ema on choosing answer, 5obj_c3, search"
 train_type: "all"
+#NoiseLoss
+#BluredMaskImgX0

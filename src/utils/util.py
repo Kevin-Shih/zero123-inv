@@ -23,6 +23,7 @@ def mask_resize(mask, size:int):
     resize_transform = transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR)
     mask = resize_transform(mask.unsqueeze(0))
     mask = transforms.CenterCrop((256, 256))(mask)
+    # print(mask.max(), mask.mean())
     return mask[0]
 
 def set_random_seed(seed):
@@ -78,6 +79,8 @@ def load_image(models, input_im_path, preprocess=True, h=256, w=256, device='cud
     if preprocess:
         input_im, forground_mask = load_and_preprocess(models['carvekit'], input_im)
         input_im = (input_im / 255.0).astype(np.float32)
+        forground_mask[forground_mask >  0.5] = 1
+        forground_mask[forground_mask <= 0.5] = 0
         # (H, W, 3) array in [0, 1].
     else:
         input_im = input_im.resize([h, w], Image.Resampling.LANCZOS)
@@ -108,6 +111,7 @@ def load_img_and_gt(
     transform_fp: str = None,
     idx: int = 0,
     return_images=True,
+    preprocess=True,
     device='cuda',
 ):
     """Load images from disk."""
@@ -126,7 +130,7 @@ def load_img_and_gt(
 
     if return_images:
         fp = os.path.join(image_dir, frame["file_path"])
-        img, mask = load_image(models, fp, device=device)
+        img, mask = load_image(models, fp, preprocess=preprocess, device=device)
 
     c2w = torch.tensor(frame["transform_matrix"])
     pose = torch.tensor(frame["latlon"])
